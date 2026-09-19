@@ -11,10 +11,21 @@
   </div>
   <p class="center"><strong>누적 {{ breakdown.total }}회</strong></p>
 </section>
+<h2>구독 상태</h2>
+<section class="card">
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="status">
+    <label class="inline"><input type="checkbox" name="is_active" {% if person.is_active %}checked{% endif %}> 활성 구독자</label>
+    <button class="primary">상태 저장</button>
+  </form>
+  <p><small>비활성화하면 새 Magic Link 발급과 기존 로그인 세션의 Quiz 접근이 차단됩니다.</small></p>
+</section>
 <h2>시즌1 과거 참여 기록</h2>
 <section class="card">
   <form method="post" class="form-grid">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="legacy">
     <label>과거 참여 횟수<input type="number" min="0" name="participation_count" required value="{{ legacy.participation_count if legacy else 0 }}"></label>
     <label class="wide">메모 — 선택<textarea name="note" rows="4">{{ legacy.note if legacy and legacy.note else '' }}</textarea></label>
     <button class="primary">저장</button>
