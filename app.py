@@ -2,14 +2,16 @@ import csv
 import io
 import os
 import secrets
+from datetime import timedelta
 from pathlib import Path
 
 from flask import (
     Flask, Response, abort, flash, redirect, render_template, request, session, url_for
 )
 
-from auth import admin_required, current_subscriber_id, subscriber_required
+from auth import admin_required, current_subscriber_id, establish_subscriber_session, subscriber_required
 from db import connect, init_db, transaction, utcnow
+from presenters import feedback_summary, format_korean_datetime
 from services import complete_attempt, save_answer, save_feedback, start_attempt, subscriber_counts
 
 
@@ -28,10 +30,15 @@ def create_app(test_config=None):
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true",
+        PERMANENT_SESSION_LIFETIME=timedelta(
+            days=int(os.environ.get("SUBSCRIBER_SESSION_DAYS", "180"))
+        ),
     )
     if test_config:
         app.config.update(test_config)
     init_db(app.config["DB_PATH"])
+    if app.config["SEED_DEMO_DATA"] and not app.config["ENABLE_TEST_IDENTITY"]:
+        raise RuntimeError("SEED_DEMO_DATA=true requires ENABLE_TEST_IDENTITY=true")
     if app.config["SEED_DEMO_DATA"]:
         seed_demo(app.config["DB_PATH"])
 
@@ -44,6 +51,7 @@ def create_app(test_config=None):
         return session["csrf_token"]
 
     app.jinja_env.globals["csrf_token"] = csrf_token
+    app.jinja_env.filters["korean_datetime"] = format_korean_datetime
 
     @app.before_request
     def verify_csrf():
@@ -80,7 +88,7 @@ def create_app(test_config=None):
             conn.close()
             if not valid:
                 abort(400)
-            session["subscriber_id"] = subscriber_id
+            establish_subscriber_session(subscriber_id)
             return redirect(_safe_next(request.form.get("next")) or url_for("index"))
         conn.close()
         return render_template("test_identity.html", people=people, next=request.args.get("next", ""))
@@ -425,7 +433,7 @@ def create_app(test_config=None):
                    WHERE fs.episode_id=? AND fa.feedback_question_id=? ORDER BY fs.created_at DESC""",
                 (episode_id, q["id"]),
             ).fetchall()
-            summaries.append((q, answers))
+            summaries.append((q, feedback_summary(q["response_type"], answers)))
         conn.close()
         if not episode:
             abort(404)
