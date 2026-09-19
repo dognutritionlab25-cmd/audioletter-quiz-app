@@ -2,8 +2,10 @@ import csv
 import io
 import os
 import secrets
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 from flask import (
     Flask, Response, abort, flash, redirect, render_template, request, session, url_for
@@ -11,8 +13,24 @@ from flask import (
 
 from auth import admin_required, current_subscriber_id, establish_subscriber_session, subscriber_required
 from db import connect, init_db, transaction, utcnow
+from magic_links import (
+    MagicLinkDeliveryError,
+    consume_magic_link_token,
+    create_magic_link_token,
+    invalidate_magic_link_token,
+    magic_link_on_cooldown,
+    send_magic_link_via_brevo,
+)
 from presenters import feedback_summary, format_korean_datetime
-from services import complete_attempt, save_answer, save_feedback, start_attempt, subscriber_counts
+from services import (
+    complete_attempt,
+    email_hash,
+    participation_breakdown,
+    save_answer,
+    save_feedback,
+    start_attempt,
+    subscriber_counts,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -27,6 +45,15 @@ def create_app(test_config=None):
         ENABLE_TEST_IDENTITY=os.environ.get("ENABLE_TEST_IDENTITY", "false").lower() == "true",
         SEED_DEMO_DATA=os.environ.get("SEED_DEMO_DATA", "false").lower() == "true",
         MIGRATION_HASH_SECRET=os.environ.get("MIGRATION_HASH_SECRET") or os.environ.get("APP_SECRET", "dev-only"),
+        BREVO_API_KEY=os.environ.get("BREVO_API_KEY", ""),
+        MAGIC_LINK_SENDER_EMAIL=os.environ.get("MAGIC_LINK_SENDER_EMAIL", ""),
+        MAGIC_LINK_SENDER_NAME=os.environ.get("MAGIC_LINK_SENDER_NAME", ""),
+        PUBLIC_BASE_URL=os.environ.get("PUBLIC_BASE_URL", ""),
+        MAGIC_LINK_TTL_MINUTES=int(os.environ.get("MAGIC_LINK_TTL_MINUTES", "15")),
+        MAGIC_LINK_REQUEST_COOLDOWN_SECONDS=int(
+            os.environ.get("MAGIC_LINK_REQUEST_COOLDOWN_SECONDS", "60")
+        ),
+        BREVO_TIMEOUT_SECONDS=int(os.environ.get("BREVO_TIMEOUT_SECONDS", "10")),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true",
@@ -61,9 +88,78 @@ def create_app(test_config=None):
             if not expected or not secrets.compare_digest(supplied, expected):
                 abort(400)
 
+    @app.after_request
+    def protect_auth_responses(response):
+        if request.path.startswith("/auth/"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
     @app.get("/health")
     def health():
         return {"status": "ok"}
+
+    @app.route("/auth/email", methods=["GET", "POST"])
+    def magic_link_request():
+        next_path = _safe_next(
+            request.form.get("next") if request.method == "POST" else request.args.get("next")
+        ) or url_for("index")
+        if current_subscriber_id() is not None:
+            return redirect(next_path)
+        if request.method == "POST":
+            email = request.form.get("email", "").strip().lower()
+            subscriber = None
+            cooldown = False
+            if _looks_like_email(email):
+                conn = db()
+                subscriber = conn.execute(
+                    "SELECT id FROM subscribers WHERE email_hash=? AND is_test=0",
+                    (email_hash(email, app.config["MIGRATION_HASH_SECRET"]),),
+                ).fetchone()
+                if subscriber:
+                    cooldown = magic_link_on_cooldown(
+                        conn,
+                        subscriber["id"],
+                        app.config["MAGIC_LINK_REQUEST_COOLDOWN_SECONDS"],
+                    )
+                conn.close()
+            if subscriber and not cooldown:
+                raw_token = create_magic_link_token(
+                    app.config["DB_PATH"],
+                    subscriber["id"],
+                    next_path,
+                    app.config["MAGIC_LINK_TTL_MINUTES"],
+                )
+                try:
+                    magic_url = _public_magic_link_url(app, raw_token)
+                    sender = app.config.get("MAGIC_LINK_SENDER") or send_magic_link_via_brevo
+                    sender(email, magic_url, app.config)
+                except MagicLinkDeliveryError:
+                    invalidate_magic_link_token(app.config["DB_PATH"], raw_token)
+                    app.logger.error(
+                        "magic_link_request_failed reason=delivery subscriber_public_data=omitted"
+                    )
+                    return render_template("magic_link_error.html", next=next_path), 503
+            return render_template("magic_link_sent.html")
+        return render_template("magic_link_request.html", next=next_path)
+
+    @app.get("/auth/verify")
+    def magic_link_verify():
+        result = consume_magic_link_token(
+            app.config["DB_PATH"], request.args.get("token", "")
+        )
+        if not result:
+            return render_template("magic_link_invalid.html"), 400
+        conn = db()
+        subscriber = conn.execute(
+            "SELECT id FROM subscribers WHERE id=? AND is_test=0",
+            (result["subscriber_id"],),
+        ).fetchone()
+        conn.close()
+        if not subscriber:
+            return render_template("magic_link_invalid.html"), 400
+        establish_subscriber_session(subscriber["id"])
+        return redirect(_safe_next(result["redirect_path"]) or url_for("index"))
 
     @app.get("/")
     def index():
@@ -221,9 +317,12 @@ def create_app(test_config=None):
                WHERE p.subscriber_id=? ORDER BY p.first_completed_at DESC""",
             (current_subscriber_id(),),
         ).fetchall()
-        total = len(rows)
+        breakdown = participation_breakdown(conn, current_subscriber_id())
         conn.close()
-        return render_template("my_history.html", person=person, rows=rows, total=total)
+        return render_template(
+            "my_history.html", person=person, rows=rows,
+            total=breakdown["total"], breakdown=breakdown,
+        )
 
     @app.route("/episode/<code>/feedback", methods=["GET", "POST"])
     @subscriber_required
@@ -405,18 +504,87 @@ def create_app(test_config=None):
             conn.execute("DELETE FROM questions WHERE id=?", (question_id,))
         return redirect(url_for("admin_episode_edit", episode_id=question["episode_id"]))
 
-    @app.get("/admin/subscribers")
+    @app.route("/admin/subscribers", methods=["GET", "POST"])
     @admin_required
     def admin_subscribers():
+        if request.method == "POST":
+            email = request.form.get("email", "").strip().lower()
+            display_name = request.form.get("display_name", "").strip() or None
+            if not _looks_like_email(email):
+                flash("올바른 이메일 주소를 입력해주세요.", "error")
+            else:
+                try:
+                    with transaction(app.config["DB_PATH"]) as conn:
+                        conn.execute(
+                            """INSERT INTO subscribers
+                               (public_id,display_name,email_hash,is_test,created_at)
+                               VALUES(?,?,?,0,?)""",
+                            (
+                                f"sub_{secrets.token_urlsafe(12)}",
+                                display_name,
+                                email_hash(email, app.config["MIGRATION_HASH_SECRET"]),
+                                utcnow(),
+                            ),
+                        )
+                    flash("구독자를 등록했습니다.", "success")
+                    return redirect(url_for("admin_subscribers"))
+                except sqlite3.IntegrityError:
+                    flash("이미 등록된 이메일입니다.", "error")
         conn = db()
         rows = conn.execute(
-            """SELECT s.public_id,s.display_name,s.is_test,COUNT(p.id) participation_count,
-               MAX(p.first_completed_at) last_participation
-               FROM subscribers s LEFT JOIN participation p ON p.subscriber_id=s.id
-               GROUP BY s.id ORDER BY participation_count DESC,s.id"""
+            """SELECT s.id,s.public_id,s.display_name,s.is_test,
+               (SELECT COUNT(*) FROM participation p WHERE p.subscriber_id=s.id) participation_count,
+               (SELECT COALESCE(SUM(lp.participation_count),0) FROM legacy_participation lp
+                WHERE lp.subscriber_id=s.id) legacy_count,
+               (SELECT MAX(p.first_completed_at) FROM participation p
+                WHERE p.subscriber_id=s.id) last_participation
+               FROM subscribers s ORDER BY
+               (participation_count + legacy_count) DESC,s.id"""
         ).fetchall()
         conn.close()
         return render_template("admin_subscribers.html", rows=rows)
+
+    @app.route("/admin/subscribers/<int:subscriber_id>", methods=["GET", "POST"])
+    @admin_required
+    def admin_subscriber_detail(subscriber_id):
+        conn = db()
+        person = conn.execute(
+            "SELECT * FROM subscribers WHERE id=?", (subscriber_id,)
+        ).fetchone()
+        conn.close()
+        if not person:
+            abort(404)
+        if request.method == "POST":
+            count = request.form.get("participation_count", type=int)
+            note = request.form.get("note", "").strip() or None
+            if count is None or count < 0:
+                flash("과거 참여 횟수는 0 이상의 숫자여야 합니다.", "error")
+            else:
+                with transaction(app.config["DB_PATH"]) as conn:
+                    conn.execute(
+                        """INSERT INTO legacy_participation
+                           (subscriber_id,season_code,participation_count,note,updated_at)
+                           VALUES(?,?,?,?,?)
+                           ON CONFLICT(subscriber_id,season_code) DO UPDATE SET
+                           participation_count=excluded.participation_count,
+                           note=excluded.note,updated_at=excluded.updated_at""",
+                        (subscriber_id, "S1", count, note, utcnow()),
+                    )
+                flash("시즌1 과거 참여 기록을 저장했습니다.", "success")
+                return redirect(url_for("admin_subscriber_detail", subscriber_id=subscriber_id))
+        conn = db()
+        legacy = conn.execute(
+            "SELECT * FROM legacy_participation WHERE subscriber_id=? AND season_code='S1'",
+            (subscriber_id,),
+        ).fetchone()
+        breakdown = participation_breakdown(conn, subscriber_id)
+        conn.close()
+        return render_template(
+            "admin_subscriber_detail.html",
+            person=person,
+            legacy=legacy,
+            breakdown=breakdown,
+        )
 
     @app.get("/admin/episodes/<int:episode_id>/feedback")
     @admin_required
@@ -471,7 +639,27 @@ def create_app(test_config=None):
 
 
 def _safe_next(value):
-    return value if value and value.startswith("/") and not value.startswith("//") else None
+    if not value or "\\" in value:
+        return None
+    parsed = urlsplit(value)
+    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/") or parsed.path.startswith("//"):
+        return None
+    return value
+
+
+def _looks_like_email(value):
+    if not value or len(value) > 254 or value.count("@") != 1:
+        return False
+    local, domain = value.rsplit("@", 1)
+    return bool(local and "." in domain and not domain.startswith(".") and not domain.endswith("."))
+
+
+def _public_magic_link_url(app, raw_token):
+    base_url = app.config.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    parsed = urlsplit(base_url)
+    if not base_url or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise MagicLinkDeliveryError("PUBLIC_BASE_URL is not configured")
+    return f"{base_url}{url_for('magic_link_verify')}?token={quote(raw_token, safe='')}"
 
 
 def create_default_feedback(conn, episode_id):

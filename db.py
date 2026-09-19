@@ -85,6 +85,26 @@ CREATE TABLE IF NOT EXISTS participation (
     UNIQUE(subscriber_id, episode_id)
 );
 
+CREATE TABLE IF NOT EXISTS legacy_participation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscriber_id INTEGER NOT NULL REFERENCES subscribers(id),
+    season_code TEXT NOT NULL,
+    participation_count INTEGER NOT NULL DEFAULT 0 CHECK(participation_count >= 0),
+    note TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(subscriber_id, season_code)
+);
+
+CREATE TABLE IF NOT EXISTS magic_link_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscriber_id INTEGER NOT NULL REFERENCES subscribers(id),
+    token_hash TEXT NOT NULL UNIQUE,
+    redirect_path TEXT NOT NULL DEFAULT '/',
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS feedback_questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
@@ -120,6 +140,8 @@ CREATE TABLE IF NOT EXISTS feedback_answers (
 CREATE INDEX IF NOT EXISTS idx_questions_episode ON questions(episode_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_attempts_subscriber_episode ON quiz_attempts(subscriber_id, episode_id);
 CREATE INDEX IF NOT EXISTS idx_participation_subscriber ON participation(subscriber_id);
+CREATE INDEX IF NOT EXISTS idx_legacy_participation_subscriber ON legacy_participation(subscriber_id);
+CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_expiry ON magic_link_tokens(expires_at, used_at);
 CREATE INDEX IF NOT EXISTS idx_feedback_episode ON feedback_submissions(episode_id);
 """
 
@@ -159,4 +181,3 @@ def transaction(path):
 def init_db(path):
     with transaction(path) as conn:
         conn.executescript(SCHEMA)
-

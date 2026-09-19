@@ -5,8 +5,12 @@ from db import transaction, utcnow
 
 
 def subscriber_counts(conn, subscriber_id, season_id=None):
-    total = conn.execute(
+    current_total = conn.execute(
         "SELECT COUNT(*) FROM participation WHERE subscriber_id=?", (subscriber_id,)
+    ).fetchone()[0]
+    legacy_total = conn.execute(
+        "SELECT COALESCE(SUM(participation_count),0) FROM legacy_participation WHERE subscriber_id=?",
+        (subscriber_id,),
     ).fetchone()[0]
     if season_id is None:
         season = 0
@@ -17,7 +21,22 @@ def subscriber_counts(conn, subscriber_id, season_id=None):
                WHERE p.subscriber_id=? AND e.season_id=?""",
             (subscriber_id, season_id),
         ).fetchone()[0]
-    return {"season": season, "total": total}
+    return {"season": season, "total": current_total + legacy_total}
+
+
+def participation_breakdown(conn, subscriber_id):
+    current_total = conn.execute(
+        "SELECT COUNT(*) FROM participation WHERE subscriber_id=?", (subscriber_id,)
+    ).fetchone()[0]
+    legacy_total = conn.execute(
+        "SELECT COALESCE(SUM(participation_count),0) FROM legacy_participation WHERE subscriber_id=?",
+        (subscriber_id,),
+    ).fetchone()[0]
+    return {
+        "current": current_total,
+        "legacy": legacy_total,
+        "total": current_total + legacy_total,
+    }
 
 
 def start_attempt(db_path, subscriber_id, episode_id):
@@ -108,4 +127,3 @@ def save_feedback(db_path, episode_id, subscriber_id, values, source="app"):
                     (submission_id, question_id, str(value)),
                 )
         return submission_id
-

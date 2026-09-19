@@ -30,7 +30,7 @@ def subscriber_required(view):
         if subscriber_id is None:
             if current_app.config["ENABLE_TEST_IDENTITY"]:
                 return redirect(url_for("test_identity", next=request.full_path))
-            abort(401)
+            return redirect(url_for("magic_link_request", next=request.full_path))
         return view(*args, **kwargs)
     return wrapped
 
