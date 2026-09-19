@@ -3,14 +3,7 @@
 <section class="hero">
   <p class="eyebrow">반려견을 읽다</p>
   <h1>오디오레터 이해 테스트</h1>
-  <p>들은 내용을 짧게 되짚고, 나의 참여 기록을 차곡차곡 남겨보세요.</p>
-</section>
-<section class="stack">
-  {% for episode in episodes %}
-  <a class="card row-card" href="{{ url_for('quiz_entry', episode=episode.code) }}">
-    <span><strong>{{ episode.code }}</strong><br>{{ episode.title }}</span><span>›</span>
-  </a>
-  {% else %}<div class="empty">공개된 테스트가 없습니다.</div>{% endfor %}
+  <p>오디오레터에서 안내된 회차의<br>'이해 테스트' 링크를 눌러 참여해주세요.</p>
+  <p><small>이미 참여한 기록은 '나의 참여'에서 확인할 수 있습니다.</small></p>
 </section>
 {% endblock %}
-
