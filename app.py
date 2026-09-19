@@ -166,12 +166,7 @@ def create_app(test_config=None):
 
     @app.get("/")
     def index():
-        conn = db()
-        episodes = conn.execute(
-            "SELECT e.*,s.title season_title FROM episodes e JOIN seasons s ON s.id=e.season_id WHERE e.is_published=1 ORDER BY e.display_order,e.code"
-        ).fetchall()
-        conn.close()
-        return render_template("index.html", episodes=episodes)
+        return render_template("index.html")
 
     @app.route("/test-identity", methods=["GET", "POST"])
     def test_identity():
