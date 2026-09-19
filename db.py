@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
     display_name TEXT,
     email_hash TEXT UNIQUE,
     is_test INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
 
@@ -181,3 +182,15 @@ def transaction(path):
 def init_db(path):
     with transaction(path) as conn:
         conn.executescript(SCHEMA)
+        _add_column_if_missing(
+            conn,
+            "subscribers",
+            "is_active",
+            "INTEGER NOT NULL DEFAULT 1",
+        )
+
+
+def _add_column_if_missing(conn, table, column, definition):
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

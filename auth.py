@@ -21,10 +21,14 @@ def subscriber_required(view):
         if subscriber_id is not None:
             conn = connect(current_app.config["DB_PATH"])
             subscriber = conn.execute(
-                "SELECT id,is_test FROM subscribers WHERE id=?", (subscriber_id,)
+                "SELECT id,is_test,is_active FROM subscribers WHERE id=?", (subscriber_id,)
             ).fetchone()
             conn.close()
-            if not subscriber or (subscriber["is_test"] and not current_app.config["ENABLE_TEST_IDENTITY"]):
+            if (
+                not subscriber
+                or not subscriber["is_active"]
+                or (subscriber["is_test"] and not current_app.config["ENABLE_TEST_IDENTITY"])
+            ):
                 session.pop("subscriber_id", None)
                 subscriber_id = None
         if subscriber_id is None:

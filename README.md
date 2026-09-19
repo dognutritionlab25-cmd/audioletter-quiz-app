@@ -14,7 +14,7 @@
 - Google Forms JSON, 과거 응답 CSV, 익명 피드백 CSV용 분리된 import/migration 계층
 - Production 인증과 분리된 테스트 신원 선택 화면
 - Brevo Transactional Email 기반 일회용 Magic Link 인증과 180일 장기 세션
-- 관리자 구독자 등록과 시즌1 과거 참여 횟수 수동 반영
+- 관리자 구독자 등록·활성 상태 관리와 시즌1 과거 참여 횟수 수동 반영
 - 관리자 Preview/검증 기반 퀴즈 CSV 일괄 Import
 
 ## 파일 구조
@@ -85,7 +85,7 @@ python app.py
 
 ## DB schema 요약
 
-- `subscribers`: 앱 내부 식별자, 표시명, 선택적 이메일 HMAC 해시
+- `subscribers`: 앱 내부 식별자, 표시명, 이메일 HMAC 해시, 활성 상태
 - `seasons`, `episodes`: 시즌과 회차·공개 상태
 - `questions`, `choices`: 가변 문항, 선택지, 정답, 배점, 해설, 순서
 - `quiz_attempts`, `attempt_answers`: 재응시를 포함한 모든 시도와 답
@@ -132,7 +132,9 @@ SUBSCRIBER_SESSION_DAYS=180
 
 DB의 실제 identity 기준은 내부 FK인 `subscribers.id`입니다. `public_id`는 이메일과 무관한 불투명 ID, `email_hash`는 인증 입력과 기존 구독자 명부를 매칭하는 값으로 사용합니다. 평문 PII는 URL·token 테이블·애플리케이션 로그에 남기지 않습니다.
 
-관리자는 `/admin/subscribers`의 `새 구독자 등록` 버튼을 눌러 `/admin/subscribers/new`에서 이메일과 표시 이름으로 실제 subscriber를 등록합니다. 이메일 원문은 저장하지 않으며 `MIGRATION_HASH_SECRET`을 사용한 HMAC 값만 `email_hash`에 저장합니다. 이 secret을 subscriber 등록 뒤 변경하면 기존 이메일과 매칭할 수 없으므로 계속 같은 값을 유지해야 합니다.
+관리자는 `/admin/subscribers`의 `새 구독자 등록` 버튼을 눌러 `/admin/subscribers/new`에서 이메일, 표시 이름, 활성 상태로 실제 subscriber를 등록합니다. 이메일 원문은 저장하지 않으며 `MIGRATION_HASH_SECRET`을 사용한 HMAC 값만 `email_hash`에 저장합니다. 이 secret을 subscriber 등록 뒤 변경하면 기존 이메일과 매칭할 수 없으므로 계속 같은 값을 유지해야 합니다.
+
+구독자 상세 화면에서 활성 상태를 변경할 수 있습니다. 비활성 subscriber는 새 Magic Link를 받을 수 없고, 이전에 발급된 미사용 링크와 이미 로그인된 장기 세션도 Quiz 접근에 사용할 수 없습니다. `is_active`는 기존 DB에 `DEFAULT 1`로 추가되는 additive migration이므로 기존 subscriber ID와 참여 데이터는 바뀌지 않습니다.
 
 Magic Link token은 기본 15분 뒤 만료되며 한 번 사용하면 다시 사용할 수 없습니다. 새 링크가 발급되면 해당 subscriber의 이전 미사용 링크는 무효화됩니다. 발송 실패 시 새 token도 즉시 무효화하고, raw token·이메일을 로그에 남기지 않습니다.
 

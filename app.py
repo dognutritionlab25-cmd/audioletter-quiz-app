@@ -115,7 +115,8 @@ def create_app(test_config=None):
             if _looks_like_email(email):
                 conn = db()
                 subscriber = conn.execute(
-                    "SELECT id FROM subscribers WHERE email_hash=? AND is_test=0",
+                    """SELECT id FROM subscribers
+                       WHERE email_hash=? AND is_test=0 AND is_active=1""",
                     (email_hash(email, app.config["MIGRATION_HASH_SECRET"]),),
                 ).fetchone()
                 if subscriber:
@@ -154,7 +155,7 @@ def create_app(test_config=None):
             return render_template("magic_link_invalid.html"), 400
         conn = db()
         subscriber = conn.execute(
-            "SELECT id FROM subscribers WHERE id=? AND is_test=0",
+            "SELECT id FROM subscribers WHERE id=? AND is_test=0 AND is_active=1",
             (result["subscriber_id"],),
         ).fetchone()
         conn.close()
@@ -177,11 +178,14 @@ def create_app(test_config=None):
         if not app.config["ENABLE_TEST_IDENTITY"]:
             abort(404)
         conn = db()
-        people = conn.execute("SELECT * FROM subscribers WHERE is_test=1 ORDER BY display_name").fetchall()
+        people = conn.execute(
+            "SELECT * FROM subscribers WHERE is_test=1 AND is_active=1 ORDER BY display_name"
+        ).fetchall()
         if request.method == "POST":
             subscriber_id = request.form.get("subscriber_id", type=int)
             valid = conn.execute(
-                "SELECT id FROM subscribers WHERE id=? AND is_test=1", (subscriber_id,)
+                "SELECT id FROM subscribers WHERE id=? AND is_test=1 AND is_active=1",
+                (subscriber_id,),
             ).fetchone()
             conn.close()
             if not valid:
@@ -559,7 +563,7 @@ def create_app(test_config=None):
     def admin_subscribers():
         conn = db()
         rows = conn.execute(
-            """SELECT s.id,s.public_id,s.display_name,s.is_test,
+            """SELECT s.id,s.public_id,s.display_name,s.is_test,s.is_active,
                (SELECT COUNT(*) FROM participation p WHERE p.subscriber_id=s.id) participation_count,
                (SELECT COALESCE(SUM(lp.participation_count),0) FROM legacy_participation lp
                 WHERE lp.subscriber_id=s.id) legacy_count,
@@ -577,6 +581,7 @@ def create_app(test_config=None):
         if request.method == "POST":
             email = request.form.get("email", "").strip().lower()
             display_name = request.form.get("display_name", "").strip() or None
+            is_active = int("is_active" in request.form)
             if not _looks_like_email(email):
                 flash("올바른 이메일 주소를 입력해주세요.", "error")
             else:
@@ -584,12 +589,13 @@ def create_app(test_config=None):
                     with transaction(app.config["DB_PATH"]) as conn:
                         conn.execute(
                             """INSERT INTO subscribers
-                               (public_id,display_name,email_hash,is_test,created_at)
-                               VALUES(?,?,?,0,?)""",
+                               (public_id,display_name,email_hash,is_test,is_active,created_at)
+                               VALUES(?,?,?,0,?,?)""",
                             (
                                 f"sub_{secrets.token_urlsafe(12)}",
                                 display_name,
                                 email_hash(email, app.config["MIGRATION_HASH_SECRET"]),
+                                is_active,
                                 utcnow(),
                             ),
                         )
@@ -610,23 +616,42 @@ def create_app(test_config=None):
         if not person:
             abort(404)
         if request.method == "POST":
-            count = request.form.get("participation_count", type=int)
-            note = request.form.get("note", "").strip() or None
-            if count is None or count < 0:
-                flash("과거 참여 횟수는 0 이상의 숫자여야 합니다.", "error")
-            else:
+            action = request.form.get("action", "legacy")
+            if action == "status":
+                is_active = int("is_active" in request.form)
                 with transaction(app.config["DB_PATH"]) as conn:
                     conn.execute(
-                        """INSERT INTO legacy_participation
-                           (subscriber_id,season_code,participation_count,note,updated_at)
-                           VALUES(?,?,?,?,?)
-                           ON CONFLICT(subscriber_id,season_code) DO UPDATE SET
-                           participation_count=excluded.participation_count,
-                           note=excluded.note,updated_at=excluded.updated_at""",
-                        (subscriber_id, "S1", count, note, utcnow()),
+                        "UPDATE subscribers SET is_active=? WHERE id=?",
+                        (is_active, subscriber_id),
                     )
-                flash("시즌1 과거 참여 기록을 저장했습니다.", "success")
+                    if not is_active:
+                        conn.execute(
+                            """UPDATE magic_link_tokens SET used_at=?
+                               WHERE subscriber_id=? AND used_at IS NULL""",
+                            (utcnow(), subscriber_id),
+                        )
+                flash("구독자 상태를 저장했습니다.", "success")
                 return redirect(url_for("admin_subscriber_detail", subscriber_id=subscriber_id))
+            if action == "legacy":
+                count = request.form.get("participation_count", type=int)
+                note = request.form.get("note", "").strip() or None
+                if count is None or count < 0:
+                    flash("과거 참여 횟수는 0 이상의 숫자여야 합니다.", "error")
+                else:
+                    with transaction(app.config["DB_PATH"]) as conn:
+                        conn.execute(
+                            """INSERT INTO legacy_participation
+                               (subscriber_id,season_code,participation_count,note,updated_at)
+                               VALUES(?,?,?,?,?)
+                               ON CONFLICT(subscriber_id,season_code) DO UPDATE SET
+                               participation_count=excluded.participation_count,
+                               note=excluded.note,updated_at=excluded.updated_at""",
+                            (subscriber_id, "S1", count, note, utcnow()),
+                        )
+                    flash("시즌1 과거 참여 기록을 저장했습니다.", "success")
+                    return redirect(url_for("admin_subscriber_detail", subscriber_id=subscriber_id))
+            else:
+                abort(400)
         conn = db()
         legacy = conn.execute(
             "SELECT * FROM legacy_participation WHERE subscriber_id=? AND season_code='S1'",
