@@ -843,6 +843,66 @@ class QuizAppTest(unittest.TestCase):
         conn.close()
         self.assertEqual(count, 1)
 
+    def test_48_admin_question_delete_preserves_participation_and_feedback(self):
+        subscriber, episode, questions = self.ids()
+        attempt_id, _ = self.finish_attempt(subscriber, episode, questions)
+        conn = connect(self.db_path)
+        feedback_questions = conn.execute(
+            "SELECT id,response_type FROM feedback_questions WHERE episode_id=? ORDER BY display_order",
+            (episode["id"],),
+        ).fetchall()
+        deleted_question_choices = conn.execute(
+            "SELECT id FROM choices WHERE question_id=?", (questions[0],)
+        ).fetchall()
+        conn.close()
+        save_feedback(
+            self.db_path,
+            episode["id"],
+            subscriber,
+            {feedback_questions[0]["id"]: ["핵심 개념"], feedback_questions[1]["id"]: "5"},
+        )
+
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "delete-question-csrf"
+        response = self.client.post(
+            f"/admin/questions/{questions[0]}/delete",
+            data={"csrf_token": "delete-question-csrf"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(f"/admin/episodes/{episode['id']}", response.headers["Location"])
+
+        conn = connect(self.db_path)
+        self.assertIsNone(
+            conn.execute("SELECT id FROM questions WHERE id=?", (questions[0],)).fetchone()
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM choices WHERE question_id=?", (questions[0],)).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM attempt_answers WHERE question_id=?", (questions[0],)).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM attempt_answers WHERE attempt_id=?", (attempt_id,)).fetchone()[0],
+            len(questions) - 1,
+        )
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM quiz_attempts").fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM participation").fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM feedback_submissions").fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM feedback_answers").fetchone()[0], 2)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM subscribers").fetchone()[0], 2)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM episodes WHERE id=?", (episode["id"],)).fetchone()[0], 1)
+        self.assertEqual(
+            conn.execute(
+                f"SELECT COUNT(*) FROM choices WHERE id IN ({','.join('?' for _ in deleted_question_choices)})",
+                tuple(row["id"] for row in deleted_question_choices),
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
