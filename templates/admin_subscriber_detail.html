@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block content %}
+<p><a href="{{ url_for('admin_subscribers') }}">← 구독자 목록</a></p>
+<p class="eyebrow">구독자</p>
+<h1>{{ person.display_name or person.public_id }}</h1>
+<section class="card">
+  <p><strong>내부 공개 ID</strong><br>{{ person.public_id }}</p>
+  <div class="metrics">
+    <div><span>앱에서 완료</span><strong>{{ breakdown.current }}회</strong></div>
+    <div><span>시즌1 과거 참여</span><strong>{{ breakdown.legacy }}회</strong></div>
+  </div>
+  <p class="center"><strong>누적 {{ breakdown.total }}회</strong></p>
+</section>
+<h2>시즌1 과거 참여 기록</h2>
+<section class="card">
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>과거 참여 횟수<input type="number" min="0" name="participation_count" required value="{{ legacy.participation_count if legacy else 0 }}"></label>
+    <label class="wide">메모 — 선택<textarea name="note" rows="4">{{ legacy.note if legacy and legacy.note else '' }}</textarea></label>
+    <button class="primary">저장</button>
+  </form>
+</section>
+{% endblock %}

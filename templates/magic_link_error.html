@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block title %}인증 메일 발송 오류{% endblock %}
+{% block content %}
+<section class="card narrow center">
+  <p class="eyebrow">발송 오류</p>
+  <h1>인증 메일을 보내지 못했습니다</h1>
+  <p>잠시 후 다시 시도해주세요. 문제가 계속되면 운영자에게 알려주세요.</p>
+  <a class="primary full button-link" href="{{ url_for('magic_link_request', next=next) }}">다시 시도하기</a>
+</section>
+{% endblock %}
