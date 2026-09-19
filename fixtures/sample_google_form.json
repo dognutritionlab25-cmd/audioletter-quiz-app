@@ -1,0 +1,31 @@
+{
+  "formId": "sample-form-not-production",
+  "info": {
+    "title": "[R042] 반려견 영양 오디오 레터 42회차 퀴즈",
+    "description": "샘플 import 검증용"
+  },
+  "settings": {"quizSettings": {"isQuiz": true}},
+  "items": [
+    {
+      "itemId": "q1",
+      "title": "첫 번째 샘플 문제의 정답은 무엇인가요?",
+      "questionItem": {"question": {
+        "questionId": "question-1",
+        "required": true,
+        "grading": {"pointValue": 1, "correctAnswers": {"answers": [{"value": "정답 선택지"}]}, "whenWrong": {"text": "샘플 해설입니다."}},
+        "choiceQuestion": {"type": "RADIO", "options": [{"value": "오답 선택지"}, {"value": "정답 선택지"}], "shuffle": false}
+      }}
+    },
+    {
+      "itemId": "q2",
+      "title": "해설이 없어도 정상 작동하나요?",
+      "questionItem": {"question": {
+        "questionId": "question-2",
+        "required": true,
+        "grading": {"pointValue": 2, "correctAnswers": {"answers": [{"value": "네"}]}},
+        "choiceQuestion": {"type": "RADIO", "options": [{"value": "네"}, {"value": "아니요"}], "shuffle": false}
+      }}
+    }
+  ]
+}
+

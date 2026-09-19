@@ -1,0 +1,5 @@
+timestamp,score,badge_email,answer_1,answer_2
+2026-01-10 14:01:00,1/2,test-one@example.invalid,A,B
+2026-01-10 14:05:00,2/2,test-one@example.invalid,B,B
+2026-01-10 14:10:00,2/2,test-two@example.invalid,B,B
+
