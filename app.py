@@ -1,0 +1,531 @@
+import csv
+import io
+import os
+import secrets
+from pathlib import Path
+
+from flask import (
+    Flask, Response, abort, flash, redirect, render_template, request, session, url_for
+)
+
+from auth import admin_required, current_subscriber_id, subscriber_required
+from db import connect, init_db, transaction, utcnow
+from services import complete_attempt, save_answer, save_feedback, start_attempt, subscriber_counts
+
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def create_app(test_config=None):
+    app = Flask(__name__)
+    app.config.update(
+        SECRET_KEY=os.environ.get("APP_SECRET") or secrets.token_hex(32),
+        ADMIN_PASSWORD=os.environ.get("ADMIN_PASSWORD", ""),
+        DB_PATH=os.environ.get("DB_PATH", str(BASE_DIR / "quiz.db")),
+        ENABLE_TEST_IDENTITY=os.environ.get("ENABLE_TEST_IDENTITY", "false").lower() == "true",
+        SEED_DEMO_DATA=os.environ.get("SEED_DEMO_DATA", "false").lower() == "true",
+        MIGRATION_HASH_SECRET=os.environ.get("MIGRATION_HASH_SECRET") or os.environ.get("APP_SECRET", "dev-only"),
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true",
+    )
+    if test_config:
+        app.config.update(test_config)
+    init_db(app.config["DB_PATH"])
+    if app.config["SEED_DEMO_DATA"]:
+        seed_demo(app.config["DB_PATH"])
+
+    def db():
+        return connect(app.config["DB_PATH"])
+
+    def csrf_token():
+        if "csrf_token" not in session:
+            session["csrf_token"] = secrets.token_urlsafe(32)
+        return session["csrf_token"]
+
+    app.jinja_env.globals["csrf_token"] = csrf_token
+
+    @app.before_request
+    def verify_csrf():
+        if request.method == "POST":
+            supplied = request.form.get("csrf_token", "")
+            expected = session.get("csrf_token", "")
+            if not expected or not secrets.compare_digest(supplied, expected):
+                abort(400)
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.get("/")
+    def index():
+        conn = db()
+        episodes = conn.execute(
+            "SELECT e.*,s.title season_title FROM episodes e JOIN seasons s ON s.id=e.season_id WHERE e.is_published=1 ORDER BY e.display_order,e.code"
+        ).fetchall()
+        conn.close()
+        return render_template("index.html", episodes=episodes)
+
+    @app.route("/test-identity", methods=["GET", "POST"])
+    def test_identity():
+        if not app.config["ENABLE_TEST_IDENTITY"]:
+            abort(404)
+        conn = db()
+        people = conn.execute("SELECT * FROM subscribers WHERE is_test=1 ORDER BY display_name").fetchall()
+        if request.method == "POST":
+            subscriber_id = request.form.get("subscriber_id", type=int)
+            valid = conn.execute(
+                "SELECT id FROM subscribers WHERE id=? AND is_test=1", (subscriber_id,)
+            ).fetchone()
+            conn.close()
+            if not valid:
+                abort(400)
+            session["subscriber_id"] = subscriber_id
+            return redirect(_safe_next(request.form.get("next")) or url_for("index"))
+        conn.close()
+        return render_template("test_identity.html", people=people, next=request.args.get("next", ""))
+
+    @app.post("/logout")
+    def logout():
+        session.pop("subscriber_id", None)
+        return redirect(url_for("index"))
+
+    @app.get("/quiz")
+    @subscriber_required
+    def quiz_entry():
+        code = request.args.get("episode", "").strip().upper()
+        conn = db()
+        episode = conn.execute(
+            """SELECT e.*,s.title season_title FROM episodes e JOIN seasons s ON s.id=e.season_id
+               WHERE e.code=? AND e.is_published=1""", (code,)
+        ).fetchone()
+        if not episode:
+            conn.close()
+            abort(404)
+        question_count = conn.execute(
+            "SELECT COUNT(*) FROM questions WHERE episode_id=?", (episode["id"],)
+        ).fetchone()[0]
+        counts = subscriber_counts(conn, current_subscriber_id(), episode["season_id"])
+        participated = conn.execute(
+            "SELECT 1 FROM participation WHERE subscriber_id=? AND episode_id=?",
+            (current_subscriber_id(), episode["id"]),
+        ).fetchone() is not None
+        conn.close()
+        return render_template(
+            "quiz_entry.html", episode=episode, question_count=question_count,
+            counts=counts, participated=participated,
+        )
+
+    @app.post("/quiz/<code>/start")
+    @subscriber_required
+    def quiz_start(code):
+        conn = db()
+        episode = conn.execute(
+            "SELECT * FROM episodes WHERE code=? AND is_published=1", (code.upper(),)
+        ).fetchone()
+        question_count = conn.execute(
+            "SELECT COUNT(*) FROM questions WHERE episode_id=?", (episode["id"],)
+        ).fetchone()[0] if episode else 0
+        conn.close()
+        if not episode or question_count == 0:
+            abort(404)
+        attempt_id = start_attempt(app.config["DB_PATH"], current_subscriber_id(), episode["id"])
+        return redirect(url_for("quiz_question", attempt_id=attempt_id, number=1))
+
+    @app.route("/attempt/<int:attempt_id>/question/<int:number>", methods=["GET", "POST"])
+    @subscriber_required
+    def quiz_question(attempt_id, number):
+        conn = db()
+        attempt = conn.execute(
+            """SELECT a.*,e.code,e.title FROM quiz_attempts a JOIN episodes e ON e.id=a.episode_id
+               WHERE a.id=? AND a.subscriber_id=? AND a.status='in_progress'""",
+            (attempt_id, current_subscriber_id()),
+        ).fetchone()
+        if not attempt:
+            conn.close()
+            abort(404)
+        questions = conn.execute(
+            "SELECT * FROM questions WHERE episode_id=? ORDER BY display_order,id", (attempt["episode_id"],)
+        ).fetchall()
+        if number < 1 or number > len(questions):
+            conn.close()
+            abort(404)
+        question = questions[number - 1]
+        choices = conn.execute(
+            "SELECT * FROM choices WHERE question_id=? ORDER BY display_order,id", (question["id"],)
+        ).fetchall()
+        if request.method == "POST":
+            choice_id = request.form.get("choice_id", type=int)
+            if choice_id is None:
+                flash("답을 선택해주세요.", "error")
+            else:
+                try:
+                    save_answer(app.config["DB_PATH"], attempt_id, question["id"], choice_id)
+                except ValueError:
+                    conn.close()
+                    abort(400)
+                conn.close()
+                if number < len(questions):
+                    return redirect(url_for("quiz_question", attempt_id=attempt_id, number=number + 1))
+                complete_attempt(app.config["DB_PATH"], attempt_id)
+                return redirect(url_for("quiz_complete", attempt_id=attempt_id))
+        conn.close()
+        return render_template(
+            "quiz_question.html", attempt=attempt, question=question, choices=choices,
+            number=number, total=len(questions),
+        )
+
+    @app.get("/attempt/<int:attempt_id>/complete")
+    @subscriber_required
+    def quiz_complete(attempt_id):
+        conn = db()
+        attempt = conn.execute(
+            """SELECT a.*,e.code,e.title,e.season_id FROM quiz_attempts a JOIN episodes e ON e.id=a.episode_id
+               WHERE a.id=? AND a.subscriber_id=? AND a.status='completed'""",
+            (attempt_id, current_subscriber_id()),
+        ).fetchone()
+        if not attempt:
+            conn.close()
+            abort(404)
+        review = conn.execute(
+            """SELECT q.text,q.explanation,c.text selected_text,aa.is_correct,correct.text correct_text
+               FROM attempt_answers aa JOIN questions q ON q.id=aa.question_id
+               LEFT JOIN choices c ON c.id=aa.choice_id
+               LEFT JOIN choices correct ON correct.question_id=q.id AND correct.is_correct=1
+               WHERE aa.attempt_id=? ORDER BY q.display_order,q.id""",
+            (attempt_id,),
+        ).fetchall()
+        counts = subscriber_counts(conn, current_subscriber_id(), attempt["season_id"])
+        conn.close()
+        return render_template("quiz_complete.html", attempt=attempt, review=review, counts=counts)
+
+    @app.get("/me")
+    @subscriber_required
+    def my_history():
+        conn = db()
+        person = conn.execute("SELECT * FROM subscribers WHERE id=?", (current_subscriber_id(),)).fetchone()
+        rows = conn.execute(
+            """SELECT e.code,e.title,p.first_completed_at,
+               (SELECT a.score || '/' || a.total_points FROM quiz_attempts a
+                WHERE a.subscriber_id=p.subscriber_id AND a.episode_id=p.episode_id
+                AND a.status='completed' ORDER BY a.completed_at DESC LIMIT 1) latest_score
+               FROM participation p JOIN episodes e ON e.id=p.episode_id
+               WHERE p.subscriber_id=? ORDER BY p.first_completed_at DESC""",
+            (current_subscriber_id(),),
+        ).fetchall()
+        total = len(rows)
+        conn.close()
+        return render_template("my_history.html", person=person, rows=rows, total=total)
+
+    @app.route("/episode/<code>/feedback", methods=["GET", "POST"])
+    @subscriber_required
+    def feedback(code):
+        conn = db()
+        episode = conn.execute("SELECT * FROM episodes WHERE code=?", (code.upper(),)).fetchone()
+        if not episode:
+            conn.close()
+            abort(404)
+        participated = conn.execute(
+            "SELECT 1 FROM participation WHERE subscriber_id=? AND episode_id=?",
+            (current_subscriber_id(), episode["id"]),
+        ).fetchone()
+        if not participated:
+            conn.close()
+            abort(403)
+        questions = conn.execute(
+            "SELECT * FROM feedback_questions WHERE episode_id=? ORDER BY display_order,id",
+            (episode["id"],),
+        ).fetchall()
+        options = {q["id"]: conn.execute(
+            "SELECT * FROM feedback_options WHERE feedback_question_id=? ORDER BY display_order,id", (q["id"],)
+        ).fetchall() for q in questions}
+        if request.method == "POST":
+            values = {}
+            for question in questions:
+                key = f"feedback_{question['id']}"
+                values[question["id"]] = request.form.getlist(key) if question["response_type"] == "multi_choice" else request.form.get(key, "")
+            conn.close()
+            save_feedback(app.config["DB_PATH"], episode["id"], current_subscriber_id(), values)
+            flash("피드백을 저장했습니다. 고맙습니다.", "success")
+            return redirect(url_for("my_history"))
+        conn.close()
+        return render_template("feedback.html", episode=episode, questions=questions, options=options)
+
+    @app.route("/admin/login", methods=["GET", "POST"])
+    def admin_login():
+        if request.method == "POST":
+            configured = app.config["ADMIN_PASSWORD"]
+            if not configured:
+                flash("ADMIN_PASSWORD가 설정되지 않았습니다.", "error")
+            elif secrets.compare_digest(request.form.get("password", ""), configured):
+                session["is_admin"] = True
+                return redirect(_safe_next(request.form.get("next")) or url_for("admin_dashboard"))
+            else:
+                flash("비밀번호가 맞지 않습니다.", "error")
+        return render_template("admin_login.html", next=request.args.get("next", ""))
+
+    @app.post("/admin/logout")
+    def admin_logout():
+        session.pop("is_admin", None)
+        return redirect(url_for("admin_login"))
+
+    @app.get("/admin")
+    @admin_required
+    def admin_dashboard():
+        conn = db()
+        totals = {
+            "subscribers": conn.execute("SELECT COUNT(*) FROM subscribers").fetchone()[0],
+            "episodes": conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0],
+            "participation": conn.execute("SELECT COUNT(*) FROM participation").fetchone()[0],
+            "feedback": conn.execute("SELECT COUNT(*) FROM feedback_submissions").fetchone()[0],
+        }
+        episodes = conn.execute(
+            """SELECT e.*,s.title season_title,
+               (SELECT COUNT(*) FROM questions q WHERE q.episode_id=e.id) question_count,
+               (SELECT COUNT(*) FROM participation p WHERE p.episode_id=e.id) participant_count,
+               (SELECT ROUND(AVG(a.score),2) FROM quiz_attempts a WHERE a.episode_id=e.id AND a.status='completed') avg_score
+               FROM episodes e JOIN seasons s ON s.id=e.season_id ORDER BY e.display_order,e.code"""
+        ).fetchall()
+        conn.close()
+        return render_template("admin_dashboard.html", totals=totals, episodes=episodes)
+
+    @app.route("/admin/seasons", methods=["GET", "POST"])
+    @admin_required
+    def admin_seasons():
+        if request.method == "POST":
+            with transaction(app.config["DB_PATH"]) as conn:
+                conn.execute(
+                    "INSERT INTO seasons(code,title,is_active,created_at) VALUES(?,?,?,?)",
+                    (request.form["code"].strip().upper(), request.form["title"].strip(), int("is_active" in request.form), utcnow()),
+                )
+            return redirect(url_for("admin_seasons"))
+        conn = db()
+        seasons = conn.execute("SELECT * FROM seasons ORDER BY id DESC").fetchall()
+        conn.close()
+        return render_template("admin_seasons.html", seasons=seasons)
+
+    @app.route("/admin/episodes/new", methods=["GET", "POST"])
+    @admin_required
+    def admin_episode_new():
+        conn = db()
+        seasons = conn.execute("SELECT * FROM seasons ORDER BY id DESC").fetchall()
+        conn.close()
+        if request.method == "POST":
+            with transaction(app.config["DB_PATH"]) as conn:
+                episode_id = conn.execute(
+                    """INSERT INTO episodes(season_id,code,title,description,display_order,is_published,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (request.form.get("season_id", type=int), request.form["code"].strip().upper(),
+                     request.form["title"].strip(), request.form.get("description", "").strip(),
+                     request.form.get("display_order", type=int, default=0), int("is_published" in request.form), utcnow(), utcnow()),
+                ).lastrowid
+                create_default_feedback(conn, episode_id)
+            return redirect(url_for("admin_episode_edit", episode_id=episode_id))
+        return render_template("admin_episode_form.html", seasons=seasons, episode=None)
+
+    @app.route("/admin/episodes/<int:episode_id>", methods=["GET", "POST"])
+    @admin_required
+    def admin_episode_edit(episode_id):
+        if request.method == "POST":
+            with transaction(app.config["DB_PATH"]) as conn:
+                conn.execute(
+                    """UPDATE episodes SET season_id=?,code=?,title=?,description=?,display_order=?,is_published=?,updated_at=? WHERE id=?""",
+                    (request.form.get("season_id", type=int), request.form["code"].strip().upper(),
+                     request.form["title"].strip(), request.form.get("description", "").strip(),
+                     request.form.get("display_order", type=int, default=0), int("is_published" in request.form), utcnow(), episode_id),
+                )
+            flash("회차를 저장했습니다.", "success")
+            return redirect(url_for("admin_episode_edit", episode_id=episode_id))
+        conn = db()
+        episode = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+        seasons = conn.execute("SELECT * FROM seasons ORDER BY id DESC").fetchall()
+        questions = conn.execute("SELECT * FROM questions WHERE episode_id=? ORDER BY display_order,id", (episode_id,)).fetchall()
+        conn.close()
+        if not episode:
+            abort(404)
+        return render_template("admin_episode_form.html", seasons=seasons, episode=episode, questions=questions)
+
+    @app.route("/admin/episodes/<int:episode_id>/questions/new", methods=["GET", "POST"])
+    @app.route("/admin/questions/<int:question_id>/edit", methods=["GET", "POST"])
+    @admin_required
+    def admin_question_form(episode_id=None, question_id=None):
+        conn = db()
+        question = conn.execute("SELECT * FROM questions WHERE id=?", (question_id,)).fetchone() if question_id else None
+        if question:
+            episode_id = question["episode_id"]
+        choices = conn.execute("SELECT * FROM choices WHERE question_id=? ORDER BY display_order,id", (question_id,)).fetchall() if question else []
+        conn.close()
+        if request.method == "POST":
+            choice_lines = [line.strip() for line in request.form.get("choices", "").splitlines() if line.strip()]
+            correct_index = request.form.get("correct_index", type=int)
+            if len(choice_lines) < 2 or correct_index is None or correct_index < 1 or correct_index > len(choice_lines):
+                flash("선택지는 2개 이상이며 정답 번호가 선택지 범위 안에 있어야 합니다.", "error")
+            else:
+                with transaction(app.config["DB_PATH"]) as conn:
+                    if question:
+                        conn.execute(
+                            "UPDATE questions SET text=?,points=?,explanation=?,display_order=? WHERE id=?",
+                            (request.form["text"].strip(), request.form.get("points", type=int, default=1),
+                             request.form.get("explanation", "").strip() or None,
+                             request.form.get("display_order", type=int, default=0), question_id),
+                        )
+                        conn.execute("DELETE FROM choices WHERE question_id=?", (question_id,))
+                    else:
+                        question_id = conn.execute(
+                            "INSERT INTO questions(episode_id,text,points,explanation,display_order) VALUES(?,?,?,?,?)",
+                            (episode_id, request.form["text"].strip(), request.form.get("points", type=int, default=1),
+                             request.form.get("explanation", "").strip() or None,
+                             request.form.get("display_order", type=int, default=0)),
+                        ).lastrowid
+                    for index, label in enumerate(choice_lines, start=1):
+                        conn.execute(
+                            "INSERT INTO choices(question_id,text,is_correct,display_order) VALUES(?,?,?,?)",
+                            (question_id, label, int(index == correct_index), index),
+                        )
+                return redirect(url_for("admin_episode_edit", episode_id=episode_id))
+        return render_template(
+            "admin_question_form.html", episode_id=episode_id, question=question, choices=choices,
+        )
+
+    @app.post("/admin/questions/<int:question_id>/delete")
+    @admin_required
+    def admin_question_delete(question_id):
+        with transaction(app.config["DB_PATH"]) as conn:
+            question = conn.execute("SELECT episode_id FROM questions WHERE id=?", (question_id,)).fetchone()
+            if not question:
+                abort(404)
+            conn.execute("DELETE FROM questions WHERE id=?", (question_id,))
+        return redirect(url_for("admin_episode_edit", episode_id=question["episode_id"]))
+
+    @app.get("/admin/subscribers")
+    @admin_required
+    def admin_subscribers():
+        conn = db()
+        rows = conn.execute(
+            """SELECT s.public_id,s.display_name,s.is_test,COUNT(p.id) participation_count,
+               MAX(p.first_completed_at) last_participation
+               FROM subscribers s LEFT JOIN participation p ON p.subscriber_id=s.id
+               GROUP BY s.id ORDER BY participation_count DESC,s.id"""
+        ).fetchall()
+        conn.close()
+        return render_template("admin_subscribers.html", rows=rows)
+
+    @app.get("/admin/episodes/<int:episode_id>/feedback")
+    @admin_required
+    def admin_feedback(episode_id):
+        conn = db()
+        episode = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+        response_count = conn.execute("SELECT COUNT(*) FROM feedback_submissions WHERE episode_id=?", (episode_id,)).fetchone()[0]
+        questions = conn.execute("SELECT * FROM feedback_questions WHERE episode_id=? ORDER BY display_order,id", (episode_id,)).fetchall()
+        summaries = []
+        for q in questions:
+            answers = conn.execute(
+                """SELECT fa.value_text,fa.value_json FROM feedback_answers fa
+                   JOIN feedback_submissions fs ON fs.id=fa.submission_id
+                   WHERE fs.episode_id=? AND fa.feedback_question_id=? ORDER BY fs.created_at DESC""",
+                (episode_id, q["id"]),
+            ).fetchall()
+            summaries.append((q, answers))
+        conn.close()
+        if not episode:
+            abort(404)
+        return render_template("admin_feedback.html", episode=episode, response_count=response_count, summaries=summaries)
+
+    @app.get("/admin/export/<kind>.csv")
+    @admin_required
+    def admin_export(kind):
+        conn = db()
+        output = io.StringIO()
+        writer = csv.writer(output)
+        if kind == "participation":
+            writer.writerow(["subscriber_id", "episode", "first_completed_at", "source"])
+            rows = conn.execute(
+                """SELECT s.public_id,e.code,p.first_completed_at,p.source FROM participation p
+                   JOIN subscribers s ON s.id=p.subscriber_id JOIN episodes e ON e.id=p.episode_id
+                   ORDER BY p.first_completed_at"""
+            ).fetchall()
+        elif kind == "attempts":
+            writer.writerow(["subscriber_id", "episode", "score", "total_points", "completed_at", "source"])
+            rows = conn.execute(
+                """SELECT s.public_id,e.code,a.score,a.total_points,a.completed_at,a.source FROM quiz_attempts a
+                   JOIN subscribers s ON s.id=a.subscriber_id JOIN episodes e ON e.id=a.episode_id
+                   WHERE a.status='completed' ORDER BY a.completed_at"""
+            ).fetchall()
+        else:
+            conn.close()
+            abort(404)
+        for row in rows:
+            writer.writerow(list(row))
+        conn.close()
+        return Response(output.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename={kind}.csv"})
+
+    return app
+
+
+def _safe_next(value):
+    return value if value and value.startswith("/") and not value.startswith("//") else None
+
+
+def create_default_feedback(conn, episode_id):
+    definitions = [
+        ("이번 오디오레터에서 인상 깊었던 내용", "multi_choice", 1),
+        ("이번 오디오레터에 대한 전반적 만족도", "rating", 2),
+        ("다음 오디오레터에서 다뤘으면 하는 내용", "text", 3),
+    ]
+    ids = []
+    for prompt, response_type, order in definitions:
+        ids.append(conn.execute(
+            "INSERT INTO feedback_questions(episode_id,prompt,response_type,display_order) VALUES(?,?,?,?)",
+            (episode_id, prompt, response_type, order),
+        ).lastrowid)
+    for order, label in enumerate(["핵심 개념", "실제 사례", "식단 적용", "보호자 관찰 기준"], start=1):
+        conn.execute(
+            "INSERT INTO feedback_options(feedback_question_id,label,display_order) VALUES(?,?,?)",
+            (ids[0], label, order),
+        )
+    for order in range(1, 6):
+        conn.execute(
+            "INSERT INTO feedback_options(feedback_question_id,label,display_order) VALUES(?,?,?)",
+            (ids[1], str(order), order),
+        )
+
+
+def seed_demo(db_path):
+    with transaction(db_path) as conn:
+        season = conn.execute("SELECT id FROM seasons WHERE code='S1'").fetchone()
+        season_id = season["id"] if season else conn.execute(
+            "INSERT INTO seasons(code,title,is_active,created_at) VALUES('S1','시즌 1',1,?)", (utcnow(),)
+        ).lastrowid
+        for public_id, name in (("test-alpha", "테스트 구독자 A"), ("test-beta", "테스트 구독자 B")):
+            conn.execute(
+                "INSERT OR IGNORE INTO subscribers(public_id,display_name,is_test,created_at) VALUES(?,?,1,?)",
+                (public_id, name, utcnow()),
+            )
+        episode = conn.execute("SELECT id FROM episodes WHERE code='R041'").fetchone()
+        if episode:
+            return
+        episode_id = conn.execute(
+            """INSERT INTO episodes(season_id,code,title,description,display_order,is_published,created_at,updated_at)
+               VALUES(?,?,?,?,?,1,?,?)""",
+            (season_id, "R041", "장과 식단을 읽는 법", "3문제 · 약 2분", 41, utcnow(), utcnow()),
+        ).lastrowid
+        demo_questions = [
+            ("이 앱에서 참여로 인정되는 시점은 언제인가요?", ["퀴즈 시작", "최초 완료", "피드백 작성"], 2, "피드백과 관계없이 퀴즈를 처음 완료하면 참여 1회가 기록됩니다."),
+            ("같은 회차를 다시 풀면 참여 횟수는 어떻게 되나요?", ["매번 증가", "점수가 오르면 증가", "증가하지 않음"], 3, None),
+            ("이해 테스트의 가장 중요한 목적은 무엇인가요?", ["경쟁", "꾸준한 학습 참여", "순위 결정"], 2, "정답률보다 꾸준히 듣고 생각한 기록을 쌓는 데 목적이 있습니다."),
+        ]
+        for q_order, (text, choices, correct, explanation) in enumerate(demo_questions, start=1):
+            qid = conn.execute(
+                "INSERT INTO questions(episode_id,text,points,explanation,display_order) VALUES(?,?,?,?,?)",
+                (episode_id, text, 1, explanation, q_order),
+            ).lastrowid
+            for c_order, label in enumerate(choices, start=1):
+                conn.execute(
+                    "INSERT INTO choices(question_id,text,is_correct,display_order) VALUES(?,?,?,?)",
+                    (qid, label, int(c_order == correct), c_order),
+                )
+        create_default_feedback(conn, episode_id)
+
+
+if __name__ == "__main__":
+    create_app().run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=False)
