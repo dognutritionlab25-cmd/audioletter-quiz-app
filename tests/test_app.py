@@ -416,7 +416,7 @@ class QuizAppTest(unittest.TestCase):
             state["is_admin"] = True
             state["csrf_token"] = "admin-csrf"
         response = self.client.post(
-            "/admin/subscribers",
+            "/admin/subscribers/new",
             data={
                 "csrf_token": "admin-csrf",
                 "email": "new-member@example.invalid",
@@ -551,6 +551,79 @@ class QuizAppTest(unittest.TestCase):
         with self.client.session_transaction() as state:
             self.assertEqual(state["subscriber_id"], subscriber)
             self.assertTrue(state.permanent)
+
+    def test_31_subscriber_list_has_new_registration_button_and_form(self):
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+        listing = self.client.get("/admin/subscribers")
+        form = self.client.get("/admin/subscribers/new")
+        self.assertEqual(listing.status_code, 200)
+        self.assertIn("새 구독자 등록", listing.get_data(as_text=True))
+        self.assertEqual(form.status_code, 200)
+        self.assertIn('name="email"', form.get_data(as_text=True))
+        self.assertIn('name="display_name"', form.get_data(as_text=True))
+
+    def test_32_duplicate_subscriber_email_is_blocked(self):
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "duplicate-csrf"
+        data = {
+            "csrf_token": "duplicate-csrf",
+            "email": "duplicate@example.invalid",
+            "display_name": "중복 확인",
+        }
+        first = self.client.post("/admin/subscribers/new", data=data)
+        second = self.client.post("/admin/subscribers/new", data=data, follow_redirects=True)
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(second.status_code, 200)
+        self.assertIn("이미 등록된 이메일입니다.", second.get_data(as_text=True))
+        conn = connect(self.db_path)
+        digest = email_hash("duplicate@example.invalid", "migration-test-secret")
+        count = conn.execute(
+            "SELECT COUNT(*) FROM subscribers WHERE email_hash=?", (digest,)
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 1)
+
+    def test_33_admin_registered_email_is_found_by_magic_link_lookup(self):
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "lookup-csrf"
+        self.client.post(
+            "/admin/subscribers/new",
+            data={
+                "csrf_token": "lookup-csrf",
+                "email": "lookup@example.invalid",
+                "display_name": "Magic Link 확인",
+            },
+        )
+        sent = []
+        _, production_client = self.production_client(
+            lambda email, url, config: sent.append((email, url))
+        )
+        csrf = self.set_csrf(production_client, "magic-lookup-csrf")
+        response = production_client.post(
+            "/auth/email",
+            data={
+                "csrf_token": csrf,
+                "email": "lookup@example.invalid",
+                "next": "/quiz?episode=R041",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "lookup@example.invalid")
+
+    def test_34_existing_test_subscribers_remain_unchanged(self):
+        conn = connect(self.db_path)
+        people = conn.execute(
+            """SELECT public_id,is_test,email_hash FROM subscribers
+               WHERE public_id IN ('test-alpha','test-beta') ORDER BY public_id"""
+        ).fetchall()
+        conn.close()
+        self.assertEqual([row["public_id"] for row in people], ["test-alpha", "test-beta"])
+        self.assertTrue(all(row["is_test"] == 1 for row in people))
+        self.assertTrue(all(row["email_hash"] is None for row in people))
 
 
 if __name__ == "__main__":
