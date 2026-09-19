@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import sqlite3
 import tempfile
@@ -12,6 +14,7 @@ from db import connect, transaction, utcnow
 from importers import import_google_form_payload, migrate_anonymous_feedback, migrate_historical_responses
 from magic_links import MagicLinkDeliveryError, create_magic_link_token, send_magic_link_via_brevo
 from presenters import feedback_summary, format_korean_datetime
+from quiz_csv_import import import_quiz_rows, parse_quiz_csv, preview_quiz_import
 from services import complete_attempt, email_hash, save_answer, save_feedback, start_attempt, subscriber_counts
 
 
@@ -84,6 +87,31 @@ class QuizAppTest(unittest.TestCase):
         with client.session_transaction() as state:
             state["csrf_token"] = value
         return value
+
+    @staticmethod
+    def quiz_csv(code, episode_number, question_count, choice_count=4, explanation=True):
+        output = io.StringIO()
+        fields = [
+            "R코드", "회차", "Form 제목", "문항", "질문", "선택지(JSON)",
+            "정답", "정답 해설", "배점", "Form ID",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fields)
+        writer.writeheader()
+        for order in range(1, question_count + 1):
+            choices = [f"{order}번 선택지 {index}" for index in range(1, choice_count + 1)]
+            writer.writerow({
+                "R코드": code,
+                "회차": episode_number,
+                "Form 제목": f"[{code}] 반려견 영양 오디오레터 {episode_number}회차 퀴즈",
+                "문항": order,
+                "질문": f"{code} 질문 {order}",
+                "선택지(JSON)": json.dumps(choices, ensure_ascii=False),
+                "정답": choices[-1],
+                "정답 해설": f"{order}번 해설" if explanation else "",
+                "배점": order,
+                "Form ID": f"form-{code}",
+            })
+        return output.getvalue()
 
     def test_01_episode_exists(self):
         conn = connect(self.db_path)
@@ -624,6 +652,196 @@ class QuizAppTest(unittest.TestCase):
         self.assertEqual([row["public_id"] for row in people], ["test-alpha", "test-beta"])
         self.assertTrue(all(row["is_test"] == 1 for row in people))
         self.assertTrue(all(row["email_hash"] is None for row in people))
+
+    def test_35_imports_two_question_episode(self):
+        rows, errors = parse_quiz_csv(self.quiz_csv("R001", 1, 2))
+        self.assertEqual(errors, [])
+        result = import_quiz_rows(self.db_path, rows)
+        conn = connect(self.db_path)
+        episode = conn.execute("SELECT * FROM episodes WHERE code='R001'").fetchone()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM questions WHERE episode_id=?", (episode["id"],)
+        ).fetchone()[0]
+        feedback_count = conn.execute(
+            "SELECT COUNT(*) FROM feedback_questions WHERE episode_id=?", (episode["id"],)
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(result["questions_created"], 2)
+        self.assertEqual(count, 2)
+        self.assertEqual(episode["season_id"], self.ids()[1]["season_id"])
+        self.assertEqual(episode["is_published"], 0)
+        self.assertEqual(feedback_count, 3)
+
+    def test_36_imports_three_question_episode(self):
+        rows, errors = parse_quiz_csv(self.quiz_csv("R002", 2, 3))
+        self.assertEqual(errors, [])
+        import_quiz_rows(self.db_path, rows)
+        conn = connect(self.db_path)
+        count = conn.execute(
+            """SELECT COUNT(*) FROM questions q JOIN episodes e ON e.id=q.episode_id
+               WHERE e.code='R002'"""
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 3)
+
+    def test_37_imports_four_choices(self):
+        rows, _ = parse_quiz_csv(self.quiz_csv("R003", 3, 1, choice_count=4))
+        import_quiz_rows(self.db_path, rows)
+        conn = connect(self.db_path)
+        count = conn.execute(
+            """SELECT COUNT(*) FROM choices c JOIN questions q ON q.id=c.question_id
+               JOIN episodes e ON e.id=q.episode_id WHERE e.code='R003'"""
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 4)
+
+    def test_38_imports_five_choices(self):
+        rows, _ = parse_quiz_csv(self.quiz_csv("R004", 4, 1, choice_count=5))
+        import_quiz_rows(self.db_path, rows)
+        conn = connect(self.db_path)
+        count = conn.execute(
+            """SELECT COUNT(*) FROM choices c JOIN questions q ON q.id=c.question_id
+               JOIN episodes e ON e.id=q.episode_id WHERE e.code='R004'"""
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 5)
+
+    def test_39_correct_answer_matches_exact_choice_string(self):
+        rows, _ = parse_quiz_csv(self.quiz_csv("R005", 5, 1))
+        expected = rows[0]["answer"]
+        import_quiz_rows(self.db_path, rows)
+        conn = connect(self.db_path)
+        correct = conn.execute(
+            """SELECT c.text FROM choices c JOIN questions q ON q.id=c.question_id
+               JOIN episodes e ON e.id=q.episode_id
+               WHERE e.code='R005' AND c.is_correct=1"""
+        ).fetchall()
+        conn.close()
+        self.assertEqual([row["text"] for row in correct], [expected])
+
+    def test_40_imports_explanation_points_and_display_order(self):
+        rows, _ = parse_quiz_csv(self.quiz_csv("R006", 6, 2))
+        import_quiz_rows(self.db_path, rows)
+        conn = connect(self.db_path)
+        questions = conn.execute(
+            """SELECT q.* FROM questions q JOIN episodes e ON e.id=q.episode_id
+               WHERE e.code='R006' ORDER BY q.display_order"""
+        ).fetchall()
+        conn.close()
+        self.assertEqual(
+            [(q["display_order"], q["points"], q["explanation"]) for q in questions],
+            [(1, 1, "1번 해설"), (2, 2, "2번 해설")],
+        )
+
+    def test_41_reimport_is_idempotent(self):
+        rows, _ = parse_quiz_csv(self.quiz_csv("R007", 7, 2))
+        first = import_quiz_rows(self.db_path, rows)
+        second = import_quiz_rows(self.db_path, rows)
+        conn = connect(self.db_path)
+        question_count = conn.execute(
+            """SELECT COUNT(*) FROM questions q JOIN episodes e ON e.id=q.episode_id
+               WHERE e.code='R007'"""
+        ).fetchone()[0]
+        episode_count = conn.execute("SELECT COUNT(*) FROM episodes WHERE code='R007'").fetchone()[0]
+        conn.close()
+        self.assertEqual(first["questions_created"], 2)
+        self.assertEqual(second["questions_created"], 0)
+        self.assertEqual(second["questions_skipped"], 2)
+        self.assertEqual((episode_count, question_count), (1, 2))
+
+    def test_42_existing_episode_is_reused_without_changing_metadata(self):
+        rows, _ = parse_quiz_csv(self.quiz_csv("R041", 41, 4))
+        rows = [rows[-1]]
+        conn = connect(self.db_path)
+        before = conn.execute("SELECT id,title,is_published FROM episodes WHERE code='R041'").fetchone()
+        conn.close()
+        result = import_quiz_rows(self.db_path, rows)
+        conn = connect(self.db_path)
+        after = conn.execute("SELECT id,title,is_published FROM episodes WHERE code='R041'").fetchone()
+        conn.close()
+        self.assertEqual(result["episodes_created"], 0)
+        self.assertEqual(tuple(before), tuple(after))
+
+    def test_43_invalid_choices_json_is_rejected(self):
+        text = self.quiz_csv("R008", 8, 1).replace(
+            '"[""1번 선택지 1"", ""1번 선택지 2"", ""1번 선택지 3"", ""1번 선택지 4""]"',
+            'not-json',
+        )
+        rows, errors = parse_quiz_csv(text)
+        self.assertEqual(rows, [])
+        self.assertTrue(any("JSON" in error["message"] for error in errors))
+
+    def test_44_answer_not_in_choices_is_rejected(self):
+        text = self.quiz_csv("R009", 9, 1).replace("1번 선택지 4", "존재하지 않는 정답", 1)
+        rows, errors = parse_quiz_csv(text)
+        self.assertEqual(rows, [])
+        self.assertTrue(any("정답은 선택지" in error["message"] for error in errors))
+
+    def test_45_existing_participation_and_feedback_survive_import(self):
+        subscriber, episode, questions = self.ids()
+        self.finish_attempt(subscriber, episode, questions)
+        conn = connect(self.db_path)
+        feedback_questions = conn.execute(
+            "SELECT id,response_type FROM feedback_questions WHERE episode_id=? ORDER BY display_order",
+            (episode["id"],),
+        ).fetchall()
+        conn.close()
+        save_feedback(
+            self.db_path,
+            episode["id"],
+            subscriber,
+            {feedback_questions[0]["id"]: ["핵심 개념"], feedback_questions[1]["id"]: "5"},
+        )
+        rows, _ = parse_quiz_csv(self.quiz_csv("R041", 41, 4))
+        import_quiz_rows(self.db_path, [rows[-1]])
+        conn = connect(self.db_path)
+        participation_count = conn.execute("SELECT COUNT(*) FROM participation").fetchone()[0]
+        feedback_count = conn.execute("SELECT COUNT(*) FROM feedback_submissions").fetchone()[0]
+        conn.close()
+        self.assertEqual(participation_count, 1)
+        self.assertEqual(feedback_count, 1)
+
+    def test_46_preview_reports_conflict_and_does_not_write(self):
+        rows, _ = parse_quiz_csv(self.quiz_csv("R041", 41, 1))
+        before = connect(self.db_path)
+        question_count = before.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+        before.close()
+        preview = preview_quiz_import(self.db_path, rows)
+        after = connect(self.db_path)
+        self.assertEqual(after.execute("SELECT COUNT(*) FROM questions").fetchone()[0], question_count)
+        after.close()
+        self.assertEqual(len(preview["conflicts"]), 1)
+        self.assertEqual(len(preview["new_questions"]), 0)
+
+    def test_47_admin_preview_and_confirm_flow(self):
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "import-csrf"
+        response = self.client.post(
+            "/admin/quiz-import",
+            data={
+                "csrf_token": "import-csrf",
+                "action": "preview",
+                "csv_file": (io.BytesIO(self.quiz_csv("R010", 10, 2).encode("utf-8")), "quiz.csv"),
+            },
+            content_type="multipart/form-data",
+        )
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("확인 후 2개 문항 Import", html)
+        marker = 'name="payload" value="'
+        payload = html.split(marker, 1)[1].split('"', 1)[0]
+        imported = self.client.post(
+            "/admin/quiz-import",
+            data={"csrf_token": "import-csrf", "action": "import", "payload": payload},
+            follow_redirects=True,
+        )
+        self.assertEqual(imported.status_code, 200)
+        self.assertIn("Import 완료", imported.get_data(as_text=True))
+        conn = connect(self.db_path)
+        count = conn.execute("SELECT COUNT(*) FROM episodes WHERE code='R010'").fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 1)
 
 
 if __name__ == "__main__":
