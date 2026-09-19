@@ -10,6 +10,7 @@ from urllib.parse import quote, urlsplit
 from flask import (
     Flask, Response, abort, flash, redirect, render_template, request, session, url_for
 )
+from itsdangerous import BadData, URLSafeTimedSerializer
 
 from auth import admin_required, current_subscriber_id, establish_subscriber_session, subscriber_required
 from db import connect, init_db, transaction, utcnow
@@ -22,6 +23,7 @@ from magic_links import (
     send_magic_link_via_brevo,
 )
 from presenters import feedback_summary, format_korean_datetime
+from quiz_csv_import import import_quiz_rows, parse_quiz_csv, preview_quiz_import
 from services import (
     complete_attempt,
     email_hash,
@@ -429,6 +431,50 @@ def create_app(test_config=None):
                 create_default_feedback(conn, episode_id)
             return redirect(url_for("admin_episode_edit", episode_id=episode_id))
         return render_template("admin_episode_form.html", seasons=seasons, episode=None)
+
+    @app.route("/admin/quiz-import", methods=["GET", "POST"])
+    @admin_required
+    def admin_quiz_import():
+        if request.method == "GET":
+            return render_template("admin_quiz_import.html", preview=None)
+
+        action = request.form.get("action")
+        serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"], salt="quiz-csv-import")
+        if action == "preview":
+            upload = request.files.get("csv_file")
+            if not upload or not upload.filename:
+                flash("CSV 파일을 선택해주세요.", "error")
+                return redirect(url_for("admin_quiz_import"))
+            try:
+                csv_text = upload.read().decode("utf-8-sig")
+            except UnicodeDecodeError:
+                flash("CSV 파일은 UTF-8 형식이어야 합니다.", "error")
+                return redirect(url_for("admin_quiz_import"))
+            rows, errors = parse_quiz_csv(csv_text)
+            preview = preview_quiz_import(app.config["DB_PATH"], rows)
+            payload = serializer.dumps(rows) if not errors else None
+            return render_template(
+                "admin_quiz_import.html",
+                preview=preview,
+                errors=errors,
+                payload=payload,
+            )
+
+        if action == "import":
+            try:
+                rows = serializer.loads(request.form.get("payload", ""), max_age=1800)
+            except BadData:
+                flash("Preview가 만료되었거나 유효하지 않습니다. CSV를 다시 확인해주세요.", "error")
+                return redirect(url_for("admin_quiz_import"))
+            result = import_quiz_rows(app.config["DB_PATH"], rows)
+            flash(
+                f"Import 완료: Episode {result['episodes_created']}개, Question "
+                f"{result['questions_created']}개 생성 · 기존 동일 {result['questions_skipped']}개, "
+                f"충돌 {result['conflicts_skipped']}개 건너뜀",
+                "success",
+            )
+            return redirect(url_for("admin_dashboard"))
+        abort(400)
 
     @app.route("/admin/episodes/<int:episode_id>", methods=["GET", "POST"])
     @admin_required

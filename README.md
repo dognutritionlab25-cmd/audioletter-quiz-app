@@ -15,6 +15,7 @@
 - Production 인증과 분리된 테스트 신원 선택 화면
 - Brevo Transactional Email 기반 일회용 Magic Link 인증과 180일 장기 세션
 - 관리자 구독자 등록과 시즌1 과거 참여 횟수 수동 반영
+- 관리자 Preview/검증 기반 퀴즈 CSV 일괄 Import
 
 ## 파일 구조
 
@@ -26,6 +27,7 @@ magic_links.py         일회용 token과 Brevo Transactional Email 발송
 presenters.py           관리자 표시용 날짜·피드백 변환
 services.py            Quiz·참여·피드백 core
 importers.py           Forms/응답/피드백 변환 계층
+quiz_csv_import.py     관리자 퀴즈 CSV 검증·중복 판정·Import
 manage.py              관리·import CLI
 templates/             모바일/관리자 화면
 static/style.css       반응형 UI
@@ -156,6 +158,20 @@ Magic Link token은 기본 15분 뒤 만료되며 한 번 사용하면 다시 �
 이 과정은 기존 Brevo Automation이나 contact attribute를 변경하지 않습니다. 앱이 Brevo의 `/v3/smtp/email` Transactional Email endpoint를 직접 호출합니다.
 
 ## sample import 검증
+
+### 관리자 퀴즈 CSV Import
+
+관리자 `/admin`에서 `퀴즈 CSV 가져오기`를 선택하고 UTF-8 CSV를 업로드합니다. 필수 열은 `R코드`, `회차`, `Form 제목`, `문항`, `질문`, `선택지(JSON)`, `정답`, `정답 해설`, `배점`, `Form ID`입니다.
+
+1. Preview에서 신규/기존 Episode, 신규/기존 동일 Question, 충돌 문항, 오류 행을 확인합니다.
+2. 오류 행이 있으면 Import 버튼이 제공되지 않습니다.
+3. 기존 Episode는 제목·공개 상태·연결 데이터를 변경하지 않고 그대로 재사용합니다.
+4. 같은 `episode + display_order`의 문항이 완전히 같으면 건너뛰고, 내용이 다르면 충돌로 표시한 뒤 건너뜁니다.
+5. 새 Episode는 Season 1에 비공개 상태로 생성되며, 관리자가 내용을 확인한 뒤 별도로 공개합니다.
+
+Preview 확인값은 30분 동안 유효한 서명 payload로 전달됩니다. Import는 Episode·Question·Choice만 추가하며 기존 participation, feedback, subscriber, 인증 데이터는 수정하거나 삭제하지 않습니다. DB schema 변경은 없습니다.
+
+### 기존 sample/CLI import
 
 실제 Google 계정이나 Production 자료를 사용하지 않습니다.
 
