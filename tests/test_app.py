@@ -6,6 +6,7 @@ from pathlib import Path
 from app import create_app, create_default_feedback, seed_demo
 from db import connect, transaction, utcnow
 from importers import import_google_form_payload, migrate_anonymous_feedback, migrate_historical_responses
+from presenters import feedback_summary, format_korean_datetime
 from services import complete_attempt, save_answer, save_feedback, start_attempt, subscriber_counts
 
 
@@ -209,6 +210,76 @@ class QuizAppTest(unittest.TestCase):
         complete = self.client.get(location)
         self.assertEqual(complete.status_code, 200)
         self.assertIn("이해 테스트 완료", complete.get_data(as_text=True))
+
+    def test_17_admin_presenters_are_human_readable(self):
+        self.assertEqual(
+            format_korean_datetime("2026-09-19T09:36:11.350866+00:00"),
+            "2026.09.19 18:36",
+        )
+        multi = feedback_summary(
+            "multi_choice",
+            [{"value_text": None, "value_json": '["핵심 개념", "실제 사례"]'}],
+        )
+        rating = feedback_summary(
+            "rating", [{"value_text": "5", "value_json": None}]
+        )
+        self.assertEqual(multi[0]["label"], "실제 사례")
+        self.assertEqual({item["label"] for item in multi}, {"핵심 개념", "실제 사례"})
+        self.assertEqual(rating, [{"label": "5점 / 5점 (매우 만족)", "count": 1}])
+
+    def test_18_admin_pages_render_clean_feedback_and_korean_time(self):
+        subscriber, episode, questions = self.ids()
+        self.finish_attempt(subscriber, episode, questions)
+        conn = connect(self.db_path)
+        feedback_q = conn.execute(
+            "SELECT id,response_type FROM feedback_questions WHERE episode_id=? ORDER BY display_order",
+            (episode["id"],),
+        ).fetchall()
+        conn.close()
+        save_feedback(
+            self.db_path,
+            episode["id"],
+            subscriber,
+            {feedback_q[0]["id"]: ["핵심 개념"], feedback_q[1]["id"]: "5"},
+        )
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+        feedback_page = self.client.get(f"/admin/episodes/{episode['id']}/feedback")
+        subscriber_page = self.client.get("/admin/subscribers")
+        feedback_html = feedback_page.get_data(as_text=True)
+        subscriber_html = subscriber_page.get_data(as_text=True)
+        self.assertIn("핵심 개념 · 1건", feedback_html)
+        self.assertIn("5점 / 5점 (매우 만족) · 1건", feedback_html)
+        self.assertNotIn('[&#34;핵심 개념&#34;]', feedback_html)
+        self.assertIn("최근 참여 (한국시간)", subscriber_html)
+        self.assertNotIn("T", subscriber_html.split("최근 참여 (한국시간)", 1)[1])
+
+    def test_19_production_mode_hides_test_identity_and_rejects_stale_test_session(self):
+        production_app = create_app({
+            "TESTING": True,
+            "SECRET_KEY": "production-test-secret",
+            "DB_PATH": self.db_path,
+            "ENABLE_TEST_IDENTITY": False,
+            "SEED_DEMO_DATA": False,
+        })
+        client = production_app.test_client()
+        self.assertEqual(client.get("/test-identity").status_code, 404)
+        with client.session_transaction() as state:
+            state["subscriber_id"] = self.ids()[0]
+        self.assertEqual(client.get("/quiz?episode=R041").status_code, 401)
+        with client.session_transaction() as state:
+            self.assertNotIn("subscriber_id", state)
+
+    def test_20_demo_seed_requires_test_identity_mode(self):
+        isolated = str(Path(self.temp.name) / "invalid-mode.db")
+        with self.assertRaises(RuntimeError):
+            create_app({
+                "TESTING": True,
+                "SECRET_KEY": "test-secret",
+                "DB_PATH": isolated,
+                "ENABLE_TEST_IDENTITY": False,
+                "SEED_DEMO_DATA": True,
+            })
 
 
 if __name__ == "__main__":
