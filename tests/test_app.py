@@ -1,13 +1,18 @@
 import json
+import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from app import create_app, create_default_feedback, seed_demo
 from db import connect, transaction, utcnow
 from importers import import_google_form_payload, migrate_anonymous_feedback, migrate_historical_responses
+from magic_links import MagicLinkDeliveryError, create_magic_link_token, send_magic_link_via_brevo
 from presenters import feedback_summary, format_korean_datetime
-from services import complete_attempt, save_answer, save_feedback, start_attempt, subscriber_counts
+from services import complete_attempt, email_hash, save_answer, save_feedback, start_attempt, subscriber_counts
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +53,37 @@ class QuizAppTest(unittest.TestCase):
             save_answer(self.db_path, attempt, qid, choice)
         conn.close()
         return attempt, complete_attempt(self.db_path, attempt)
+
+    def create_real_subscriber(self, email="member@example.invalid", display_name="실제 구독자"):
+        with transaction(self.db_path) as conn:
+            return conn.execute(
+                """INSERT INTO subscribers(public_id,display_name,email_hash,is_test,created_at)
+                   VALUES(?,?,?,0,?)""",
+                ("sub_real_member", display_name, email_hash(email, "migration-test-secret"), utcnow()),
+            ).lastrowid
+
+    def production_client(self, sender):
+        app = create_app({
+            "TESTING": True,
+            "SECRET_KEY": "production-test-secret",
+            "ADMIN_PASSWORD": "admin-test",
+            "DB_PATH": self.db_path,
+            "ENABLE_TEST_IDENTITY": False,
+            "SEED_DEMO_DATA": False,
+            "MIGRATION_HASH_SECRET": "migration-test-secret",
+            "PUBLIC_BASE_URL": "https://quiz.example.test",
+            "MAGIC_LINK_TTL_MINUTES": 15,
+            "MAGIC_LINK_REQUEST_COOLDOWN_SECONDS": 0,
+            "MAGIC_LINK_SENDER": sender,
+            "PERMANENT_SESSION_LIFETIME": timedelta(days=180),
+        })
+        return app, app.test_client()
+
+    @staticmethod
+    def set_csrf(client, value="auth-csrf"):
+        with client.session_transaction() as state:
+            state["csrf_token"] = value
+        return value
 
     def test_01_episode_exists(self):
         conn = connect(self.db_path)
@@ -266,7 +302,9 @@ class QuizAppTest(unittest.TestCase):
         self.assertEqual(client.get("/test-identity").status_code, 404)
         with client.session_transaction() as state:
             state["subscriber_id"] = self.ids()[0]
-        self.assertEqual(client.get("/quiz?episode=R041").status_code, 401)
+        response = client.get("/quiz?episode=R041")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/auth/email", response.headers["Location"])
         with client.session_transaction() as state:
             self.assertNotIn("subscriber_id", state)
 
@@ -280,6 +318,239 @@ class QuizAppTest(unittest.TestCase):
                 "ENABLE_TEST_IDENTITY": False,
                 "SEED_DEMO_DATA": True,
             })
+
+    def test_21_registered_and_unknown_email_have_same_external_response(self):
+        self.create_real_subscriber()
+        sent = []
+        _, client = self.production_client(lambda email, url, config: sent.append((email, url)))
+        csrf = self.set_csrf(client)
+        known = client.post(
+            "/auth/email",
+            data={"csrf_token": csrf, "email": "member@example.invalid", "next": "/quiz?episode=R041"},
+        )
+        unknown = client.post(
+            "/auth/email",
+            data={"csrf_token": csrf, "email": "unknown@example.invalid", "next": "/quiz?episode=R041"},
+        )
+        self.assertEqual(known.status_code, 200)
+        self.assertEqual(known.get_data(), unknown.get_data())
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "member@example.invalid")
+
+    def test_22_magic_link_authenticates_once_and_returns_to_original_episode(self):
+        subscriber_id = self.create_real_subscriber()
+        sent = []
+        app, client = self.production_client(lambda email, url, config: sent.append(url))
+        csrf = self.set_csrf(client)
+        client.post(
+            "/auth/email",
+            data={"csrf_token": csrf, "email": "member@example.invalid", "next": "/quiz?episode=R041"},
+        )
+        token = parse_qs(urlsplit(sent[0]).query)["token"][0]
+        conn = connect(self.db_path)
+        stored_token = conn.execute(
+            "SELECT token_hash FROM magic_link_tokens WHERE subscriber_id=?", (subscriber_id,)
+        ).fetchone()[0]
+        conn.close()
+        self.assertNotEqual(stored_token, token)
+        verified = client.get(f"/auth/verify?token={token}")
+        self.assertEqual(verified.status_code, 302)
+        self.assertEqual(verified.headers["Location"], "/quiz?episode=R041")
+        self.assertEqual(verified.headers["Cache-Control"], "no-store")
+        self.assertEqual(verified.headers["Referrer-Policy"], "no-referrer")
+        with client.session_transaction() as state:
+            self.assertEqual(state["subscriber_id"], subscriber_id)
+            self.assertTrue(state.permanent)
+        self.assertEqual(app.permanent_session_lifetime, timedelta(days=180))
+        self.assertEqual(client.get(f"/auth/verify?token={token}").status_code, 400)
+
+    def test_23_expired_and_invalid_magic_links_are_rejected(self):
+        subscriber_id = self.create_real_subscriber()
+        _, client = self.production_client(lambda email, url, config: None)
+        raw_token = create_magic_link_token(self.db_path, subscriber_id, "/", 15)
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                "UPDATE magic_link_tokens SET expires_at=? WHERE subscriber_id=?",
+                ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), subscriber_id),
+            )
+        self.assertEqual(client.get(f"/auth/verify?token={raw_token}").status_code, 400)
+        self.assertEqual(client.get("/auth/verify?token=not-a-real-token").status_code, 400)
+
+    def test_24_external_redirect_is_replaced_with_internal_home(self):
+        self.create_real_subscriber()
+        sent = []
+        _, client = self.production_client(lambda email, url, config: sent.append(url))
+        csrf = self.set_csrf(client)
+        client.post(
+            "/auth/email",
+            data={"csrf_token": csrf, "email": "member@example.invalid", "next": "https://evil.example/phish"},
+        )
+        token = parse_qs(urlsplit(sent[0]).query)["token"][0]
+        verified = client.get(f"/auth/verify?token={token}")
+        self.assertEqual(verified.headers["Location"], "/")
+
+    def test_25_delivery_failure_is_not_reported_as_success_and_token_is_invalidated(self):
+        subscriber_id = self.create_real_subscriber()
+
+        def fail_sender(email, url, config):
+            raise MagicLinkDeliveryError("simulated provider failure")
+
+        _, client = self.production_client(fail_sender)
+        csrf = self.set_csrf(client)
+        response = client.post(
+            "/auth/email",
+            data={"csrf_token": csrf, "email": "member@example.invalid", "next": "/quiz?episode=R041"},
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("인증 메일을 보내지 못했습니다", response.get_data(as_text=True))
+        conn = connect(self.db_path)
+        token_row = conn.execute(
+            "SELECT used_at FROM magic_link_tokens WHERE subscriber_id=? ORDER BY id DESC LIMIT 1",
+            (subscriber_id,),
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(token_row["used_at"])
+
+    def test_26_admin_can_register_subscriber_without_storing_plain_email(self):
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "admin-csrf"
+        response = self.client.post(
+            "/admin/subscribers",
+            data={
+                "csrf_token": "admin-csrf",
+                "email": "new-member@example.invalid",
+                "display_name": "새 구독자",
+            },
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        conn = connect(self.db_path)
+        person = conn.execute(
+            "SELECT * FROM subscribers WHERE display_name='새 구독자'"
+        ).fetchone()
+        conn.close()
+        self.assertTrue(person["public_id"].startswith("sub_"))
+        self.assertEqual(
+            person["email_hash"], email_hash("new-member@example.invalid", "migration-test-secret")
+        )
+        self.assertNotEqual(person["public_id"], "new-member@example.invalid")
+
+    def test_27_legacy_count_adds_only_to_lifetime_total(self):
+        subscriber, episode, questions = self.ids()
+        self.finish_attempt(subscriber, episode, questions)
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "legacy-csrf"
+        response = self.client.post(
+            f"/admin/subscribers/{subscriber}",
+            data={"csrf_token": "legacy-csrf", "participation_count": "18", "note": "시즌1 수동 반영"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        conn = connect(self.db_path)
+        counts = subscriber_counts(conn, subscriber, episode["season_id"])
+        actual_participation = conn.execute(
+            "SELECT COUNT(*) FROM participation WHERE subscriber_id=?", (subscriber,)
+        ).fetchone()[0]
+        legacy = conn.execute(
+            "SELECT participation_count,note FROM legacy_participation WHERE subscriber_id=?",
+            (subscriber,),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(counts, {"season": 1, "total": 19})
+        self.assertEqual(actual_participation, 1)
+        self.assertEqual(legacy["participation_count"], 18)
+        self.assertEqual(legacy["note"], "시즌1 수동 반영")
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber
+        history = self.client.get("/me").get_data(as_text=True)
+        self.assertIn("누적 19회", history)
+        self.assertIn("시즌1 과거 참여 18회", history)
+
+    def test_28_existing_database_rows_survive_additive_schema_upgrade(self):
+        legacy_db = str(Path(self.temp.name) / "existing.db")
+        raw = sqlite3.connect(legacy_db)
+        raw.execute(
+            """CREATE TABLE subscribers (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT NOT NULL UNIQUE,
+               display_name TEXT, email_hash TEXT UNIQUE, is_test INTEGER NOT NULL DEFAULT 0,
+               created_at TEXT NOT NULL)"""
+        )
+        raw.execute(
+            "INSERT INTO subscribers(public_id,display_name,is_test,created_at) VALUES('kept-row','보존 대상',0,?)",
+            (utcnow(),),
+        )
+        raw.commit()
+        raw.close()
+        create_app({
+            "TESTING": True,
+            "SECRET_KEY": "upgrade-test",
+            "DB_PATH": legacy_db,
+            "ENABLE_TEST_IDENTITY": False,
+            "SEED_DEMO_DATA": False,
+        })
+        conn = connect(legacy_db)
+        kept = conn.execute("SELECT display_name FROM subscribers WHERE public_id='kept-row'").fetchone()
+        tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        conn.close()
+        self.assertEqual(kept["display_name"], "보존 대상")
+        self.assertIn("magic_link_tokens", tables)
+        self.assertIn("legacy_participation", tables)
+
+    def test_29_brevo_transactional_payload_matches_api_contract(self):
+        class FakeResponse:
+            status = 201
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        config = {
+            "BREVO_API_KEY": "test-api-key",
+            "MAGIC_LINK_SENDER_EMAIL": "sender@example.invalid",
+            "MAGIC_LINK_SENDER_NAME": "반려견영양연구소",
+            "BREVO_TIMEOUT_SECONDS": 10,
+        }
+        with patch("magic_links.urllib.request.urlopen", return_value=FakeResponse()) as mocked:
+            send_magic_link_via_brevo(
+                "member@example.invalid",
+                "https://quiz.example.test/auth/verify?token=safe-test-token",
+                config,
+            )
+        request = mocked.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.full_url, "https://api.brevo.com/v3/smtp/email")
+        self.assertEqual(request.get_header("Api-key"), "test-api-key")
+        self.assertEqual(payload["sender"]["email"], "sender@example.invalid")
+        self.assertEqual(payload["to"], [{"email": "member@example.invalid"}])
+        self.assertIn("htmlContent", payload)
+
+    def test_30_test_identity_picker_still_authenticates_test_subscriber(self):
+        subscriber, _, _ = self.ids()
+        page = self.client.get("/test-identity?next=/quiz?episode=R041")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("테스트 구독자 A", page.get_data(as_text=True))
+        csrf = self.set_csrf(self.client, "test-identity-csrf")
+        selected = self.client.post(
+            "/test-identity",
+            data={
+                "csrf_token": csrf,
+                "subscriber_id": subscriber,
+                "next": "/quiz?episode=R041",
+            },
+        )
+        self.assertEqual(selected.status_code, 302)
+        self.assertEqual(selected.headers["Location"], "/quiz?episode=R041")
+        with self.client.session_transaction() as state:
+            self.assertEqual(state["subscriber_id"], subscriber)
+            self.assertTrue(state.permanent)
 
 
 if __name__ == "__main__":
