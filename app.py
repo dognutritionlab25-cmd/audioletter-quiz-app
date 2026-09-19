@@ -547,6 +547,10 @@ def create_app(test_config=None):
             question = conn.execute("SELECT episode_id FROM questions WHERE id=?", (question_id,)).fetchone()
             if not question:
                 abort(404)
+            # Completed attempts reference both the question and its selected choice
+            # without ON DELETE CASCADE. Remove only those question-level answer rows;
+            # keep the attempt summary, participation, feedback, and subscriber data.
+            conn.execute("DELETE FROM attempt_answers WHERE question_id=?", (question_id,))
             conn.execute("DELETE FROM questions WHERE id=?", (question_id,))
         return redirect(url_for("admin_episode_edit", episode_id=question["episode_id"]))
 
