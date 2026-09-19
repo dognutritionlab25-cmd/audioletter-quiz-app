@@ -1,3 +1,2 @@
 {% extends 'base.html' %}
-{% block content %}<h1>구독자별 참여 현황</h1><div class="table-wrap"><table><thead><tr><th>내부 ID</th><th>표시 이름</th><th>참여 회차</th><th>최근 참여</th></tr></thead><tbody>{% for r in rows %}<tr><td>{{ r.public_id }}</td><td>{{ r.display_name or '-' }}{% if r.is_test %} (테스트){% endif %}</td><td>{{ r.participation_count }}</td><td>{{ r.last_participation or '-' }}</td></tr>{% endfor %}</tbody></table></div>{% endblock %}
-
+{% block content %}<h1>구독자별 참여 현황</h1><div class="table-wrap"><table><thead><tr><th>내부 ID</th><th>표시 이름</th><th>참여 회차</th><th>최근 참여 (한국시간)</th></tr></thead><tbody>{% for r in rows %}<tr><td>{{ r.public_id }}</td><td>{{ r.display_name or '-' }}{% if r.is_test %} (테스트){% endif %}</td><td>{{ r.participation_count }}</td><td>{{ r.last_participation|korean_datetime }}</td></tr>{% endfor %}</tbody></table></div>{% endblock %}
