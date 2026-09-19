@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>{{ '문항 수정' if question else '문항 추가' }}</h1>
+<section class="card">
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label class="wide">문제<textarea name="text" required rows="3">{{ question.text if question else '' }}</textarea></label>
+    <label>배점<input type="number" name="points" min="0" value="{{ question.points if question else 1 }}"></label>
+    <label>표시 순서<input type="number" name="display_order" value="{{ question.display_order if question else 0 }}"></label>
+    <label class="wide">선택지 — 한 줄에 하나<textarea name="choices" required rows="6">{% for c in choices %}{{ c.text }}{% if not loop.last %}
+{% endif %}{% endfor %}</textarea></label>
+    <label>정답 번호<input type="number" name="correct_index" min="1" required value="{% for c in choices %}{% if c.is_correct %}{{ loop.index }}{% endif %}{% endfor %}"></label>
+    <label class="wide">해설 — 선택<textarea name="explanation" rows="4">{{ question.explanation if question and question.explanation else '' }}</textarea></label>
+    <button class="primary">저장</button>
+  </form>
+</section>
+{% endblock %}

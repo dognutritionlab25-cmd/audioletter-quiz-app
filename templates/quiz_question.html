@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block title %}{{ attempt.code }} {{ number }}/{{ total }}{% endblock %}
+{% block content %}
+<section class="card question-card">
+  <div class="progress"><span style="width: {{ number / total * 100 }}%"></span></div>
+  <p class="eyebrow">{{ attempt.code }} · {{ number }} / {{ total }}</p>
+  <h1>{{ question.text }}</h1>
+  <form method="post" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% for choice in choices %}
+    <label class="choice radio-choice">
+      <input type="radio" name="choice_id" value="{{ choice.id }}" required>
+      <span>{{ choice.text }}</span>
+    </label>
+    {% endfor %}
+    <button class="primary full">{% if number == total %}제출하고 결과 보기{% else %}다음 문제{% endif %}</button>
+  </form>
+</section>
+{% endblock %}

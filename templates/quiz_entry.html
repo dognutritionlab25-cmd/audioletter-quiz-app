@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block title %}{{ episode.code }} 이해 테스트{% endblock %}
+{% block content %}
+<section class="card quiz-intro">
+  <p class="eyebrow">{{ episode.season_title }}</p>
+  <h1>{{ episode.code }} 이해 테스트</h1>
+  <h2>{{ episode.title }}</h2>
+  <p>{{ question_count }}문제 · 약 {{ [question_count, 1]|max }}분</p>
+  <div class="metrics">
+    <div><span>이번 시즌</span><strong>{{ counts.season }}회</strong></div>
+    <div><span>누적 참여</span><strong>{{ counts.total }}회</strong></div>
+  </div>
+  {% if participated %}<p class="notice">이미 참여가 적립된 회차입니다. 다시 풀어도 참여 횟수는 늘지 않습니다.</p>{% endif %}
+  <form method="post" action="{{ url_for('quiz_start', code=episode.code) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="primary full">{% if participated %}다시 풀기{% else %}테스트 시작하기{% endif %}</button>
+  </form>
+</section>
+{% endblock %}

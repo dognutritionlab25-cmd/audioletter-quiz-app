@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}{{ attempt.code }} 완료{% endblock %}
+{% block content %}
+<section class="card center">
+  <div class="complete-mark">✓</div>
+  <p class="eyebrow">{{ attempt.code }}</p><h1>이해 테스트 완료</h1>
+  <div class="score">{{ attempt.score }} / {{ attempt.total_points }}</div>
+  <div class="metrics">
+    <div><span>이번 시즌</span><strong>{{ counts.season }}회</strong></div>
+    <div><span>누적 참여</span><strong>{{ counts.total }}회</strong></div>
+  </div>
+</section>
+<section class="stack review">
+  <h2>정답과 해설</h2>
+  {% for row in review %}
+  <article class="card">
+    <span class="result {{ 'correct' if row.is_correct else 'wrong' }}">{{ '정답' if row.is_correct else '다시 보기' }}</span>
+    <h3>{{ row.text }}</h3>
+    {% if not row.is_correct %}<p>선택: {{ row.selected_text }}<br><strong>정답: {{ row.correct_text }}</strong></p>{% endif %}
+    {% if row.explanation %}<p class="explanation">{{ row.explanation }}</p>{% endif %}
+  </article>
+  {% endfor %}
+  <a class="primary full button-link" href="{{ url_for('feedback', code=attempt.code) }}">선택적으로 피드백 남기기</a>
+  <a class="secondary full button-link" href="{{ url_for('my_history') }}">나의 참여 기록 보기</a>
+</section>
+{% endblock %}
+

@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block title %}테스트 구독자 선택{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <p class="eyebrow">개발 전용</p><h1>테스트 구독자 선택</h1>
+  <p>Production 인증과 연결되지 않은 안전한 테스트 화면입니다.</p>
+  <form method="post" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    {% for person in people %}
+      <button class="choice" name="subscriber_id" value="{{ person.id }}">{{ person.display_name }}</button>
+    {% endfor %}
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="hero"><p class="eyebrow">{{ episode.code }}</p><h1>선택적 피드백</h1><p>작성하지 않아도 참여 기록에는 영향이 없습니다.</p></section>
+<form method="post" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  {% for q in questions %}
+  <section class="card"><h2>{{ q.prompt }}</h2>
+    {% if q.response_type == 'multi_choice' %}
+      {% for option in options[q.id] %}<label class="check-choice"><input type="checkbox" name="feedback_{{ q.id }}" value="{{ option.label }}"> {{ option.label }}</label>{% endfor %}
+    {% elif q.response_type == 'rating' %}
+      <div class="rating">{% for option in options[q.id] %}<label><input type="radio" name="feedback_{{ q.id }}" value="{{ option.label }}"> {{ option.label }}</label>{% endfor %}</div>
+    {% else %}<textarea name="feedback_{{ q.id }}" rows="5" placeholder="자유롭게 적어주세요."></textarea>{% endif %}
+  </section>
+  {% endfor %}
+  <button class="primary full">피드백 저장</button>
+</form>
+{% endblock %}
