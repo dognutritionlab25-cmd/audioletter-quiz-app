@@ -113,6 +113,43 @@ class QuizAppTest(unittest.TestCase):
             })
         return output.getvalue()
 
+    def create_episode(self, code, published=True):
+        episode_number = int(code[1:])
+        with transaction(self.db_path) as conn:
+            season_id = conn.execute(
+                "SELECT id FROM seasons WHERE code='S1'"
+            ).fetchone()[0]
+            episode_id = conn.execute(
+                """INSERT INTO episodes
+                   (season_id,code,title,description,display_order,is_published,created_at,updated_at)
+                   VALUES(?,?,?,'',?,?,?,?)""",
+                (
+                    season_id,
+                    code,
+                    f"{code} 운영 회차",
+                    episode_number,
+                    int(published),
+                    utcnow(),
+                    utcnow(),
+                ),
+            ).lastrowid
+            question_id = conn.execute(
+                """INSERT INTO questions
+                   (episode_id,text,points,explanation,display_order)
+                   VALUES(?,?,1,NULL,1)""",
+                (episode_id, f"{code} 테스트 문항"),
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO choices(question_id,text,is_correct,display_order) VALUES(?,?,1,1)",
+                (question_id, "정답"),
+            )
+            conn.execute(
+                "INSERT INTO choices(question_id,text,is_correct,display_order) VALUES(?,?,0,2)",
+                (question_id, "오답"),
+            )
+            create_default_feedback(conn, episode_id)
+        return episode_id, [question_id]
+
     def test_01_episode_exists(self):
         conn = connect(self.db_path)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0], 1)
@@ -1095,6 +1132,99 @@ class QuizAppTest(unittest.TestCase):
         }
         conn.close()
         self.assertEqual(after, before)
+
+    def test_55_home_does_not_expose_public_episode_list(self):
+        self.create_episode("R018", published=True)
+        self.create_episode("R042", published=True)
+        response = self.client.get("/")
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("오디오레터에서 안내된 회차", html)
+        self.assertNotIn("R018", html)
+        self.assertNotIn("R042", html)
+        self.assertNotIn("/quiz?episode=", html)
+
+    def test_56_authenticated_subscriber_can_open_each_fixed_episode_url(self):
+        subscriber, _, _ = self.ids()
+        self.create_episode("R018", published=True)
+        self.create_episode("R042", published=True)
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber
+        r018 = self.client.get("/quiz?episode=R018")
+        r042 = self.client.get("/quiz?episode=R042")
+        self.assertEqual(r018.status_code, 200)
+        self.assertEqual(r042.status_code, 200)
+        self.assertIn("R018 이해 테스트", r018.get_data(as_text=True))
+        self.assertIn("R042 이해 테스트", r042.get_data(as_text=True))
+
+    def test_57_magic_link_returns_to_requested_r018_episode(self):
+        self.create_episode("R018", published=True)
+        subscriber_id = self.create_real_subscriber()
+        sent = []
+        _, client = self.production_client(
+            lambda email, url, config: sent.append(url)
+        )
+
+        entry = client.get("/quiz?episode=R018")
+        self.assertEqual(entry.status_code, 302)
+        login_url = entry.headers["Location"]
+        self.assertIn("/auth/email", login_url)
+        next_path = parse_qs(urlsplit(login_url).query)["next"][0]
+        self.assertEqual(next_path, "/quiz?episode=R018")
+
+        csrf = self.set_csrf(client, "r018-magic-csrf")
+        requested = client.post(
+            "/auth/email",
+            data={
+                "csrf_token": csrf,
+                "email": "member@example.invalid",
+                "next": next_path,
+            },
+        )
+        self.assertEqual(requested.status_code, 200)
+        token = parse_qs(urlsplit(sent[0]).query)["token"][0]
+        verified = client.get(f"/auth/verify?token={token}")
+        self.assertEqual(verified.status_code, 302)
+        self.assertEqual(verified.headers["Location"], "/quiz?episode=R018")
+        with client.session_transaction() as state:
+            self.assertEqual(state["subscriber_id"], subscriber_id)
+            self.assertTrue(state.permanent)
+        self.assertEqual(client.get(verified.headers["Location"]).status_code, 200)
+
+    def test_58_unpublished_episode_fixed_url_is_blocked(self):
+        subscriber, _, _ = self.ids()
+        self.create_episode("R018", published=False)
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber
+        self.assertEqual(self.client.get("/quiz?episode=R018").status_code, 404)
+
+    def test_59_history_shows_completed_episode_only(self):
+        subscriber, _, _ = self.ids()
+        r018_id, r018_questions = self.create_episode("R018", published=True)
+        self.create_episode("R042", published=True)
+        self.finish_attempt(
+            subscriber,
+            {"id": r018_id},
+            r018_questions,
+        )
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber
+        history = self.client.get("/me")
+        html = history.get_data(as_text=True)
+        self.assertEqual(history.status_code, 200)
+        self.assertIn("R018", html)
+        self.assertNotIn("R042", html)
+
+    def test_60_admin_still_sees_all_episodes(self):
+        self.create_episode("R018", published=True)
+        self.create_episode("R042", published=True)
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+        response = self.client.get("/admin")
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("R018", html)
+        self.assertIn("R042", html)
 
 
 if __name__ == "__main__":
