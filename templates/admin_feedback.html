@@ -1,0 +1,3 @@
+{% extends 'base.html' %}
+{% block content %}<p class="eyebrow">{{ episode.code }}</p><h1>회차별 피드백</h1><p>총 {{ response_count }}건</p>{% for q,answers in summaries %}<section class="card"><h2>{{ q.prompt }}</h2>{% if q.response_type == 'text' %}<ul>{% for a in answers %}{% if a.value_text %}<li>{{ a.value_text }}</li>{% endif %}{% endfor %}</ul>{% else %}<div class="stack compact">{% set counts = namespace(values={}) %}{% for a in answers %}<div>{{ a.value_json or a.value_text }}</div>{% endfor %}</div>{% endif %}</section>{% endfor %}{% endblock %}
+
