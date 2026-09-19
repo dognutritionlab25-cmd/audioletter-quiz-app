@@ -1,16 +1,6 @@
 {% extends 'base.html' %}
 {% block content %}
-<h1>구독자별 참여 현황</h1>
-<section class="card">
-  <h2>구독자 등록</h2>
-  <form method="post" class="form-grid">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <label>이메일<input type="email" name="email" autocomplete="off" required></label>
-    <label>표시 이름<input name="display_name"></label>
-    <button class="primary">등록</button>
-  </form>
-  <p><small>이메일 원문은 저장하지 않고 인증용 HMAC 값만 저장합니다.</small></p>
-</section>
+<div class="admin-head"><h1>구독자별 참여 현황</h1><a class="primary button-link" href="{{ url_for('admin_subscriber_new') }}">새 구독자 등록</a></div>
 <div class="table-wrap"><table><thead><tr><th>내부 ID</th><th>표시 이름</th><th>앱 참여</th><th>과거 참여</th><th>누적</th><th>최근 참여 (한국시간)</th></tr></thead><tbody>
 {% for r in rows %}<tr><td><a href="{{ url_for('admin_subscriber_detail', subscriber_id=r.id) }}">{{ r.public_id }}</a></td><td>{{ r.display_name or '-' }}{% if r.is_test %} (테스트){% endif %}</td><td>{{ r.participation_count }}</td><td>{{ r.legacy_count }}</td><td>{{ r.participation_count + r.legacy_count }}</td><td>{{ r.last_participation|korean_datetime }}</td></tr>{% endfor %}
 </tbody></table></div>
