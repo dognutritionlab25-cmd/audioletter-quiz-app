@@ -449,6 +449,7 @@ class QuizAppTest(unittest.TestCase):
                 "csrf_token": "admin-csrf",
                 "email": "new-member@example.invalid",
                 "display_name": "새 구독자",
+                "is_active": "on",
             },
             follow_redirects=True,
         )
@@ -590,6 +591,7 @@ class QuizAppTest(unittest.TestCase):
         self.assertEqual(form.status_code, 200)
         self.assertIn('name="email"', form.get_data(as_text=True))
         self.assertIn('name="display_name"', form.get_data(as_text=True))
+        self.assertIn('name="is_active"', form.get_data(as_text=True))
 
     def test_32_duplicate_subscriber_email_is_blocked(self):
         with self.client.session_transaction() as state:
@@ -599,6 +601,7 @@ class QuizAppTest(unittest.TestCase):
             "csrf_token": "duplicate-csrf",
             "email": "duplicate@example.invalid",
             "display_name": "중복 확인",
+            "is_active": "on",
         }
         first = self.client.post("/admin/subscribers/new", data=data)
         second = self.client.post("/admin/subscribers/new", data=data, follow_redirects=True)
@@ -623,6 +626,7 @@ class QuizAppTest(unittest.TestCase):
                 "csrf_token": "lookup-csrf",
                 "email": "lookup@example.invalid",
                 "display_name": "Magic Link 확인",
+                "is_active": "on",
             },
         )
         sent = []
@@ -902,6 +906,195 @@ class QuizAppTest(unittest.TestCase):
             0,
         )
         conn.close()
+
+    def test_49_magic_link_email_is_normalized(self):
+        self.create_real_subscriber(email="member@example.invalid")
+        sent = []
+        _, client = self.production_client(
+            lambda email, url, config: sent.append((email, url))
+        )
+        csrf = self.set_csrf(client, "normalize-csrf")
+        response = client.post(
+            "/auth/email",
+            data={
+                "csrf_token": csrf,
+                "email": "  MEMBER@EXAMPLE.INVALID  ",
+                "next": "/quiz?episode=R041",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "member@example.invalid")
+
+    def test_50_inactive_subscriber_gets_generic_response_without_email(self):
+        subscriber_id = self.create_real_subscriber()
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                "UPDATE subscribers SET is_active=0 WHERE id=?", (subscriber_id,)
+            )
+        sent = []
+        _, client = self.production_client(
+            lambda email, url, config: sent.append((email, url))
+        )
+        csrf = self.set_csrf(client, "inactive-request-csrf")
+        inactive = client.post(
+            "/auth/email",
+            data={
+                "csrf_token": csrf,
+                "email": "member@example.invalid",
+                "next": "/quiz?episode=R041",
+            },
+        )
+        unknown = client.post(
+            "/auth/email",
+            data={
+                "csrf_token": csrf,
+                "email": "unknown@example.invalid",
+                "next": "/quiz?episode=R041",
+            },
+        )
+        self.assertEqual(inactive.get_data(), unknown.get_data())
+        self.assertEqual(sent, [])
+
+    def test_51_inactive_subscriber_cannot_verify_or_reuse_session(self):
+        subscriber_id = self.create_real_subscriber()
+        sent = []
+        _, client = self.production_client(
+            lambda email, url, config: sent.append(url)
+        )
+        csrf = self.set_csrf(client, "inactive-verify-csrf")
+        client.post(
+            "/auth/email",
+            data={
+                "csrf_token": csrf,
+                "email": "member@example.invalid",
+                "next": "/quiz?episode=R041",
+            },
+        )
+        token = parse_qs(urlsplit(sent[0]).query)["token"][0]
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                "UPDATE subscribers SET is_active=0 WHERE id=?", (subscriber_id,)
+            )
+        self.assertEqual(client.get(f"/auth/verify?token={token}").status_code, 400)
+
+        with client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+        blocked = client.get("/quiz?episode=R041")
+        self.assertEqual(blocked.status_code, 302)
+        self.assertIn("/auth/email", blocked.headers["Location"])
+        with client.session_transaction() as state:
+            self.assertNotIn("subscriber_id", state)
+
+    def test_52_admin_registration_and_status_control_active_subscriber(self):
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "status-admin-csrf"
+        created = self.client.post(
+            "/admin/subscribers/new",
+            data={
+                "csrf_token": "status-admin-csrf",
+                "email": "status@example.invalid",
+                "display_name": "상태 확인",
+                "is_active": "on",
+            },
+        )
+        self.assertEqual(created.status_code, 302)
+        conn = connect(self.db_path)
+        person = conn.execute(
+            "SELECT id,is_active FROM subscribers WHERE email_hash=?",
+            (email_hash("status@example.invalid", "migration-test-secret"),),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(person["is_active"], 1)
+
+        disabled = self.client.post(
+            f"/admin/subscribers/{person['id']}",
+            data={"csrf_token": "status-admin-csrf", "action": "status"},
+        )
+        self.assertEqual(disabled.status_code, 302)
+        conn = connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT is_active FROM subscribers WHERE id=?", (person["id"],)
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+
+    def test_53_additive_active_migration_preserves_existing_rows(self):
+        legacy_db = str(Path(self.temp.name) / "subscriber-active-upgrade.db")
+        raw = sqlite3.connect(legacy_db)
+        raw.execute(
+            """CREATE TABLE subscribers (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT NOT NULL UNIQUE,
+               display_name TEXT, email_hash TEXT UNIQUE,
+               is_test INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"""
+        )
+        raw.execute(
+            """INSERT INTO subscribers(public_id,display_name,email_hash,is_test,created_at)
+               VALUES('existing-production','기존 운영 구독자','kept-hash',0,?)""",
+            (utcnow(),),
+        )
+        raw.commit()
+        raw.close()
+
+        create_app({
+            "TESTING": True,
+            "SECRET_KEY": "additive-test",
+            "DB_PATH": legacy_db,
+            "ENABLE_TEST_IDENTITY": False,
+            "SEED_DEMO_DATA": False,
+        })
+        conn = connect(legacy_db)
+        person = conn.execute(
+            "SELECT * FROM subscribers WHERE public_id='existing-production'"
+        ).fetchone()
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(subscribers)")
+        }
+        conn.close()
+        self.assertIn("is_active", columns)
+        self.assertEqual(person["display_name"], "기존 운영 구독자")
+        self.assertEqual(person["email_hash"], "kept-hash")
+        self.assertEqual(person["is_active"], 1)
+
+    def test_54_schema_initialization_preserves_quiz_participation_and_feedback(self):
+        subscriber, episode, questions = self.ids()
+        self.finish_attempt(subscriber, episode, questions)
+        conn = connect(self.db_path)
+        feedback_questions = conn.execute(
+            "SELECT id FROM feedback_questions WHERE episode_id=? ORDER BY display_order",
+            (episode["id"],),
+        ).fetchall()
+        conn.close()
+        save_feedback(
+            self.db_path,
+            episode["id"],
+            subscriber,
+            {feedback_questions[0]["id"]: ["핵심 개념"]},
+        )
+        conn = connect(self.db_path)
+        tables = (
+            "subscribers", "episodes", "questions", "choices", "quiz_attempts",
+            "attempt_answers", "participation", "feedback_submissions", "feedback_answers",
+        )
+        before = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in tables
+        }
+        conn.close()
+
+        from db import init_db
+        init_db(self.db_path)
+
+        conn = connect(self.db_path)
+        after = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in tables
+        }
+        conn.close()
+        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":
