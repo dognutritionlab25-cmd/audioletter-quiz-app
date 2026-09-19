@@ -1,10 +1,9 @@
 {% extends 'base.html' %}
 {% block content %}
-<section class="hero"><p class="eyebrow">나의 기록</p><h1>{{ person.display_name or '구독자' }}님의 참여</h1><p>누적 {{ total }}회 참여했습니다.</p></section>
+<section class="hero"><p class="eyebrow">나의 기록</p><h1>{{ person.display_name or '구독자' }}님의 참여</h1><p>누적 {{ total }}회 참여했습니다.</p>{% if breakdown.legacy %}<p><small>앱에서 완료 {{ breakdown.current }}회 + 시즌1 과거 참여 {{ breakdown.legacy }}회</small></p>{% endif %}</section>
 <section class="stack">
   {% for row in rows %}
   <div class="card row-card"><span><strong>{{ row.code }} · {{ row.title }}</strong><br><small>최초 완료 {{ row.first_completed_at[:10] }}</small></span><span>{{ row.latest_score }}</span></div>
   {% else %}<div class="empty">아직 완료한 테스트가 없습니다.</div>{% endfor %}
 </section>
 {% endblock %}
-
