@@ -504,9 +504,26 @@ def create_app(test_config=None):
             conn.execute("DELETE FROM questions WHERE id=?", (question_id,))
         return redirect(url_for("admin_episode_edit", episode_id=question["episode_id"]))
 
-    @app.route("/admin/subscribers", methods=["GET", "POST"])
+    @app.get("/admin/subscribers")
     @admin_required
     def admin_subscribers():
+        conn = db()
+        rows = conn.execute(
+            """SELECT s.id,s.public_id,s.display_name,s.is_test,
+               (SELECT COUNT(*) FROM participation p WHERE p.subscriber_id=s.id) participation_count,
+               (SELECT COALESCE(SUM(lp.participation_count),0) FROM legacy_participation lp
+                WHERE lp.subscriber_id=s.id) legacy_count,
+               (SELECT MAX(p.first_completed_at) FROM participation p
+                WHERE p.subscriber_id=s.id) last_participation
+               FROM subscribers s ORDER BY
+               (participation_count + legacy_count) DESC,s.id"""
+        ).fetchall()
+        conn.close()
+        return render_template("admin_subscribers.html", rows=rows)
+
+    @app.route("/admin/subscribers/new", methods=["GET", "POST"])
+    @admin_required
+    def admin_subscriber_new():
         if request.method == "POST":
             email = request.form.get("email", "").strip().lower()
             display_name = request.form.get("display_name", "").strip() or None
@@ -530,19 +547,7 @@ def create_app(test_config=None):
                     return redirect(url_for("admin_subscribers"))
                 except sqlite3.IntegrityError:
                     flash("이미 등록된 이메일입니다.", "error")
-        conn = db()
-        rows = conn.execute(
-            """SELECT s.id,s.public_id,s.display_name,s.is_test,
-               (SELECT COUNT(*) FROM participation p WHERE p.subscriber_id=s.id) participation_count,
-               (SELECT COALESCE(SUM(lp.participation_count),0) FROM legacy_participation lp
-                WHERE lp.subscriber_id=s.id) legacy_count,
-               (SELECT MAX(p.first_completed_at) FROM participation p
-                WHERE p.subscriber_id=s.id) last_participation
-               FROM subscribers s ORDER BY
-               (participation_count + legacy_count) DESC,s.id"""
-        ).fetchall()
-        conn.close()
-        return render_template("admin_subscribers.html", rows=rows)
+        return render_template("admin_subscriber_new.html")
 
     @app.route("/admin/subscribers/<int:subscriber_id>", methods=["GET", "POST"])
     @admin_required

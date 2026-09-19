@@ -130,7 +130,7 @@ SUBSCRIBER_SESSION_DAYS=180
 
 DB의 실제 identity 기준은 내부 FK인 `subscribers.id`입니다. `public_id`는 이메일과 무관한 불투명 ID, `email_hash`는 인증 입력과 기존 구독자 명부를 매칭하는 값으로 사용합니다. 평문 PII는 URL·token 테이블·애플리케이션 로그에 남기지 않습니다.
 
-관리자는 `/admin/subscribers`에서 이메일과 표시 이름으로 실제 subscriber를 등록합니다. 이메일 원문은 저장하지 않으며 `MIGRATION_HASH_SECRET`을 사용한 HMAC 값만 `email_hash`에 저장합니다. 이 secret을 subscriber 등록 뒤 변경하면 기존 이메일과 매칭할 수 없으므로 계속 같은 값을 유지해야 합니다.
+관리자는 `/admin/subscribers`의 `새 구독자 등록` 버튼을 눌러 `/admin/subscribers/new`에서 이메일과 표시 이름으로 실제 subscriber를 등록합니다. 이메일 원문은 저장하지 않으며 `MIGRATION_HASH_SECRET`을 사용한 HMAC 값만 `email_hash`에 저장합니다. 이 secret을 subscriber 등록 뒤 변경하면 기존 이메일과 매칭할 수 없으므로 계속 같은 값을 유지해야 합니다.
 
 Magic Link token은 기본 15분 뒤 만료되며 한 번 사용하면 다시 사용할 수 없습니다. 새 링크가 발급되면 해당 subscriber의 이전 미사용 링크는 무효화됩니다. 발송 실패 시 새 token도 즉시 무효화하고, raw token·이메일을 로그에 남기지 않습니다.
 
