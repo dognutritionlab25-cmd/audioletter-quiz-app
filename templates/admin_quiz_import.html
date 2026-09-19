@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+{% block title %}퀴즈 CSV 가져오기{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('admin_dashboard') }}">← 운영 현황</a></p>
+<div class="admin-head"><div><p class="eyebrow">ADMIN</p><h1>퀴즈 CSV 가져오기</h1></div></div>
+
+{% if not preview %}
+<section class="card narrow">
+  <form method="post" enctype="multipart/form-data" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="preview">
+    <label>Google Sheet에서 다운로드한 CSV
+      <input type="file" name="csv_file" accept=".csv,text/csv" required>
+    </label>
+    <small>가져온 회차는 안전을 위해 비공개로 생성됩니다. 기존 회차와 문항은 수정하거나 삭제하지 않습니다.</small>
+    <button class="primary" type="submit">Preview / 검증</button>
+  </form>
+</section>
+{% else %}
+<div class="metrics four">
+  <div><span>신규 Episode</span><strong>{{ preview.new_episode_count }}</strong></div>
+  <div><span>기존 Episode</span><strong>{{ preview.existing_episode_count }}</strong></div>
+  <div><span>신규 Question</span><strong>{{ preview.new_questions|length }}</strong></div>
+  <div><span>기존 동일 문항</span><strong>{{ preview.existing_questions|length }}</strong></div>
+</div>
+
+{% if errors %}
+<section class="card"><h2>오류 행</h2><p>오류를 수정한 CSV를 다시 올려주세요. 오류가 있는 파일은 Import할 수 없습니다.</p>
+  <div class="table-wrap"><table><thead><tr><th>CSV 행</th><th>오류</th></tr></thead><tbody>
+  {% for error in errors %}<tr><td>{{ error.row }}</td><td>{{ error.message }}</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endif %}
+
+{% if preview.conflicts %}
+<section class="card"><h2>충돌 문항</h2><p>기존 문항과 참여 데이터 보호를 위해 아래 문항은 변경하지 않고 건너뜁니다.</p>
+  <div class="table-wrap"><table><thead><tr><th>CSV 행</th><th>회차</th><th>문항</th><th>내용</th></tr></thead><tbody>
+  {% for conflict in preview.conflicts %}<tr><td>{{ conflict.csv_row }}</td><td>{{ conflict.code }}</td><td>{{ conflict.question_order }}</td><td>{{ conflict.message }}</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endif %}
+
+<div class="admin-head">
+  <a class="secondary button-link" href="{{ url_for('admin_quiz_import') }}">다른 CSV 선택</a>
+  {% if not errors and preview.new_questions %}
+  <form method="post" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="import">
+    <input type="hidden" name="payload" value="{{ payload }}">
+    <button class="primary" type="submit">확인 후 {{ preview.new_questions|length }}개 문항 Import</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}
