@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>{{ '회차 수정' if episode else '새 회차' }}</h1>
+<section class="card">
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>시즌<select name="season_id">{% for s in seasons %}<option value="{{ s.id }}" {% if episode and episode.season_id==s.id %}selected{% endif %}>{{ s.title }}</option>{% endfor %}</select></label>
+    <label>회차 코드<input name="code" required value="{{ episode.code if episode else '' }}" placeholder="R042"></label>
+    <label>제목<input name="title" required value="{{ episode.title if episode else '' }}"></label>
+    <label>순서<input type="number" name="display_order" value="{{ episode.display_order if episode else 0 }}"></label>
+    <label class="wide">설명<textarea name="description">{{ episode.description if episode else '' }}</textarea></label>
+    <label class="inline"><input type="checkbox" name="is_published" {% if episode and episode.is_published %}checked{% endif %}> 공개</label>
+    <button class="primary">저장</button>
+  </form>
+</section>
+{% if episode %}
+<div class="admin-head"><h2>문항</h2><a class="primary button-link" href="{{ url_for('admin_question_form', episode_id=episode.id) }}">문항 추가</a></div>
+<section class="stack">
+  {% for q in questions %}
+  <div class="card row-card">
+    <span><strong>{{ q.display_order }}. {{ q.text }}</strong><br>{{ q.points }}점{% if q.explanation %} · 해설 있음{% endif %}</span>
+    <span><a href="{{ url_for('admin_question_form', question_id=q.id) }}">수정</a>
+      <form class="inline-form" method="post" action="{{ url_for('admin_question_delete', question_id=q.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-danger">삭제</button>
+      </form>
+    </span>
+  </div>
+  {% else %}<div class="empty">문항이 없습니다.</div>{% endfor %}
+</section>
+{% endif %}
+{% endblock %}
+
