@@ -33,6 +33,7 @@ class QuizAppTest(unittest.TestCase):
             "ENABLE_TEST_IDENTITY": True,
             "SEED_DEMO_DATA": False,
             "MIGRATION_HASH_SECRET": "migration-test-secret",
+            "SUBSCRIBER_SYNC_API_KEY": "sync-test-secret",
         })
         seed_demo(self.db_path)
         self.client = self.app.test_client()
@@ -1225,6 +1226,136 @@ class QuizAppTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("R018", html)
         self.assertIn("R042", html)
+
+    def test_61_subscriber_sync_creates_real_subscriber_without_plaintext_email(self):
+        response = self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={
+                "email": "new-sync@example.invalid",
+                "display_name": "신규 동기화 구독자",
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["status"], "created")
+
+        digest = email_hash("new-sync@example.invalid", "migration-test-secret")
+        conn = connect(self.db_path)
+        person = conn.execute(
+            "SELECT * FROM subscribers WHERE email_hash=?", (digest,)
+        ).fetchone()
+        stored_text = " ".join(
+            str(value) for value in person if value is not None
+        )
+        conn.close()
+        self.assertIsNotNone(person)
+        self.assertEqual(person["display_name"], "신규 동기화 구독자")
+        self.assertEqual(person["is_test"], 0)
+        self.assertEqual(person["is_active"], 1)
+        self.assertNotIn("new-sync@example.invalid", stored_text)
+
+    def test_62_subscriber_sync_is_idempotent_and_normalizes_email(self):
+        headers = {"Authorization": "Bearer sync-test-secret"}
+        first = self.client.post(
+            "/api/subscribers/sync",
+            headers=headers,
+            json={"email": " Repeat@Example.Invalid ", "display_name": "처음 이름"},
+        )
+        second = self.client.post(
+            "/api/subscribers/sync",
+            headers=headers,
+            json={"email": "repeat@example.invalid", "display_name": "덮어쓸 이름"},
+        )
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.get_json()["status"], "unchanged")
+        self.assertEqual(
+            first.get_json()["subscriber"]["public_id"],
+            second.get_json()["subscriber"]["public_id"],
+        )
+
+        digest = email_hash("repeat@example.invalid", "migration-test-secret")
+        conn = connect(self.db_path)
+        people = conn.execute(
+            "SELECT id,display_name FROM subscribers WHERE email_hash=?", (digest,)
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(people), 1)
+        self.assertEqual(people[0]["display_name"], "처음 이름")
+
+    def test_63_subscriber_sync_preserves_existing_identity_and_participation(self):
+        subscriber_id = self.create_real_subscriber(
+            "existing-sync@example.invalid", "관리자 지정 이름"
+        )
+        _, episode, questions = self.ids()
+        self.finish_attempt(subscriber_id, episode, questions)
+        conn = connect(self.db_path)
+        participation_before = conn.execute(
+            "SELECT id,first_completed_at FROM participation WHERE subscriber_id=?",
+            (subscriber_id,),
+        ).fetchone()
+        conn.close()
+
+        response = self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={
+                "email": " EXISTING-SYNC@example.invalid ",
+                "display_name": "자동화 이름",
+                "active": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "updated")
+
+        conn = connect(self.db_path)
+        person = conn.execute(
+            "SELECT id,display_name,is_active FROM subscribers WHERE id=?",
+            (subscriber_id,),
+        ).fetchone()
+        participation_after = conn.execute(
+            "SELECT id,first_completed_at FROM participation WHERE subscriber_id=?",
+            (subscriber_id,),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(person["id"], subscriber_id)
+        self.assertEqual(person["display_name"], "관리자 지정 이름")
+        self.assertEqual(person["is_active"], 0)
+        self.assertEqual(dict(participation_after), dict(participation_before))
+
+    def test_64_subscriber_sync_rejects_bad_auth_and_invalid_input(self):
+        missing = self.client.post(
+            "/api/subscribers/sync", json={"email": "member@example.invalid"}
+        )
+        wrong = self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer wrong-secret"},
+            json={"email": "member@example.invalid"},
+        )
+        invalid_email = self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": "not-an-email"},
+        )
+        invalid_active = self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": "member@example.invalid", "active": "true"},
+        )
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(wrong.status_code, 401)
+        self.assertEqual(invalid_email.status_code, 400)
+        self.assertEqual(invalid_active.status_code, 400)
+
+        conn = connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM subscribers WHERE email_hash=?",
+                (email_hash("member@example.invalid", "migration-test-secret"),),
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
 
 
 if __name__ == "__main__":
