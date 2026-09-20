@@ -70,6 +70,7 @@ python app.py
 | `ENABLE_TEST_IDENTITY` | 예 | 독립 테스트 시 `true`, 공개 전 `false` |
 | `SEED_DEMO_DATA` | 예 | 최초 demo 데이터가 필요할 때만 `true` |
 | `MIGRATION_HASH_SECRET` | 예 | 이메일 HMAC identity key. 등록 후 절대 임의 변경하지 않음 |
+| `SUBSCRIBER_SYNC_API_KEY` | Make 연동 시 예 | subscriber sync API 전용 긴 무작위 Bearer secret. 다른 secret과 재사용하지 않음 |
 | `SESSION_COOKIE_SECURE` | 예 | Railway HTTPS에서는 `true` |
 | `SUBSCRIBER_SESSION_DAYS` | 예 | 인증 후 같은 브라우저 유지 기간. 권장 `180` |
 | `PUBLIC_BASE_URL` | 예 | Railway 공개 URL. 예: `https://...up.railway.app` |
@@ -133,6 +134,20 @@ SUBSCRIBER_SESSION_DAYS=180
 DB의 실제 identity 기준은 내부 FK인 `subscribers.id`입니다. `public_id`는 이메일과 무관한 불투명 ID, `email_hash`는 인증 입력과 기존 구독자 명부를 매칭하는 값으로 사용합니다. 평문 PII는 URL·token 테이블·애플리케이션 로그에 남기지 않습니다.
 
 관리자는 `/admin/subscribers`의 `새 구독자 등록` 버튼을 눌러 `/admin/subscribers/new`에서 이메일, 표시 이름, 활성 상태로 실제 subscriber를 등록합니다. 이메일 원문은 저장하지 않으며 `MIGRATION_HASH_SECRET`을 사용한 HMAC 값만 `email_hash`에 저장합니다. 이 secret을 subscriber 등록 뒤 변경하면 기존 이메일과 매칭할 수 없으므로 계속 같은 값을 유지해야 합니다.
+
+### Make subscriber sync API
+
+Make는 `POST /api/subscribers/sync`를 호출해 subscriber를 안전하게 upsert할 수 있습니다. `Authorization: Bearer <SUBSCRIBER_SYNC_API_KEY>`와 `Content-Type: application/json`이 필요합니다.
+
+```json
+{
+  "email": "member@example.com",
+  "display_name": "보호자 이름",
+  "active": true
+}
+```
+
+`email`만 필수입니다. 이메일은 관리자 등록 및 Magic Link와 동일하게 정규화하고 `MIGRATION_HASH_SECRET` HMAC으로 대조하며 원문을 저장하지 않습니다. 기존 subscriber이면 내부 ID와 참여 기록을 유지합니다. 기존 표시 이름은 덮어쓰지 않고 비어 있을 때만 채우며, `active`는 요청에 명시된 경우에만 변경합니다. 같은 요청을 반복해도 새 subscriber가 추가되지 않습니다.
 
 구독자 상세 화면에서 활성 상태를 변경할 수 있습니다. 비활성 subscriber는 새 Magic Link를 받을 수 없고, 이전에 발급된 미사용 링크와 이미 로그인된 장기 세션도 Quiz 접근에 사용할 수 없습니다. `is_active`는 기존 DB에 `DEFAULT 1`로 추가되는 additive migration이므로 기존 subscriber ID와 참여 데이터는 바뀌지 않습니다.
 

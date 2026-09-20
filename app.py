@@ -47,6 +47,7 @@ def create_app(test_config=None):
         ENABLE_TEST_IDENTITY=os.environ.get("ENABLE_TEST_IDENTITY", "false").lower() == "true",
         SEED_DEMO_DATA=os.environ.get("SEED_DEMO_DATA", "false").lower() == "true",
         MIGRATION_HASH_SECRET=os.environ.get("MIGRATION_HASH_SECRET") or os.environ.get("APP_SECRET", "dev-only"),
+        SUBSCRIBER_SYNC_API_KEY=os.environ.get("SUBSCRIBER_SYNC_API_KEY", ""),
         BREVO_API_KEY=os.environ.get("BREVO_API_KEY", ""),
         MAGIC_LINK_SENDER_EMAIL=os.environ.get("MAGIC_LINK_SENDER_EMAIL", ""),
         MAGIC_LINK_SENDER_NAME=os.environ.get("MAGIC_LINK_SENDER_NAME", ""),
@@ -84,7 +85,10 @@ def create_app(test_config=None):
 
     @app.before_request
     def verify_csrf():
-        if request.method == "POST":
+        # The Make sync endpoint authenticates with its own bearer secret and
+        # does not use a browser session. Keep the exemption limited to this
+        # single endpoint; all form POST routes retain CSRF protection.
+        if request.method == "POST" and request.endpoint != "subscriber_sync":
             supplied = request.form.get("csrf_token", "")
             expected = session.get("csrf_token", "")
             if not expected or not secrets.compare_digest(supplied, expected):
@@ -100,6 +104,111 @@ def create_app(test_config=None):
     @app.get("/health")
     def health():
         return {"status": "ok"}
+
+    @app.post("/api/subscribers/sync")
+    def subscriber_sync():
+        configured_key = app.config.get("SUBSCRIBER_SYNC_API_KEY", "")
+        if not configured_key:
+            return {"error": "subscriber sync is not configured"}, 503
+
+        authorization = request.headers.get("Authorization", "")
+        scheme, separator, supplied_key = authorization.partition(" ")
+        if (
+            not separator
+            or scheme.lower() != "bearer"
+            or not supplied_key
+            or not secrets.compare_digest(supplied_key, configured_key)
+        ):
+            return {"error": "unauthorized"}, 401
+
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return {"error": "request body must be a JSON object"}, 400
+
+        raw_email = payload.get("email")
+        if not isinstance(raw_email, str):
+            return {"error": "email is required"}, 400
+        normalized_email = raw_email.strip().lower()
+        if not _looks_like_email(normalized_email):
+            return {"error": "invalid email"}, 400
+
+        display_name_supplied = "display_name" in payload
+        display_name = payload.get("display_name")
+        if display_name_supplied and display_name is not None and not isinstance(display_name, str):
+            return {"error": "display_name must be a string or null"}, 400
+        if isinstance(display_name, str):
+            display_name = display_name.strip() or None
+
+        active_supplied = "active" in payload
+        active = payload.get("active")
+        if active_supplied and type(active) is not bool:
+            return {"error": "active must be a boolean"}, 400
+
+        digest = email_hash(normalized_email, app.config["MIGRATION_HASH_SECRET"])
+        requested_active = int(active) if active_supplied else 1
+        generated_public_id = f"sub_{secrets.token_urlsafe(12)}"
+        changed = False
+
+        with transaction(app.config["DB_PATH"]) as conn:
+            inserted = conn.execute(
+                """INSERT OR IGNORE INTO subscribers
+                   (public_id,display_name,email_hash,is_test,is_active,created_at)
+                   VALUES(?,?,?,0,?,?)""",
+                (
+                    generated_public_id,
+                    display_name,
+                    digest,
+                    requested_active,
+                    utcnow(),
+                ),
+            ).rowcount == 1
+            subscriber = conn.execute(
+                """SELECT id,public_id,display_name,is_test,is_active
+                   FROM subscribers WHERE email_hash=?""",
+                (digest,),
+            ).fetchone()
+            if subscriber is None:
+                # Defensive response for an unexpected uniqueness conflict.
+                return {"error": "subscriber could not be synchronized"}, 409
+
+            if not inserted:
+                updates = []
+                parameters = []
+                # Do not overwrite a name curated in the admin UI. The API may
+                # only fill a currently blank name.
+                if display_name and not subscriber["display_name"]:
+                    updates.append("display_name=?")
+                    parameters.append(display_name)
+                if active_supplied and subscriber["is_active"] != int(active):
+                    updates.append("is_active=?")
+                    parameters.append(int(active))
+                if updates:
+                    parameters.append(subscriber["id"])
+                    conn.execute(
+                        f"UPDATE subscribers SET {','.join(updates)} WHERE id=?",
+                        parameters,
+                    )
+                    changed = True
+                if active_supplied and not active:
+                    conn.execute(
+                        """UPDATE magic_link_tokens SET used_at=?
+                           WHERE subscriber_id=? AND used_at IS NULL""",
+                        (utcnow(), subscriber["id"]),
+                    )
+                subscriber = conn.execute(
+                    """SELECT id,public_id,display_name,is_test,is_active
+                       FROM subscribers WHERE id=?""",
+                    (subscriber["id"],),
+                ).fetchone()
+
+        status = "created" if inserted else "updated" if changed else "unchanged"
+        return {
+            "status": status,
+            "subscriber": {
+                "public_id": subscriber["public_id"],
+                "active": bool(subscriber["is_active"]),
+            },
+        }, 201 if inserted else 200
 
     @app.route("/auth/email", methods=["GET", "POST"])
     def magic_link_request():
