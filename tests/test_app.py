@@ -2285,6 +2285,201 @@ class QuizAppTest(unittest.TestCase):
         with self.client.session_transaction() as state:
             self.assertNotIn("subscriber_id", state)
 
+    def test_98_public_subscription_terms_and_privacy_need_no_login(self):
+        for path, text in [
+            ("/subscribe", "반려견 영양 오디오레터"),
+            ("/terms", "서비스 이용약관"),
+            ("/privacy", "개인정보처리방침"),
+        ]:
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(text, response.get_data(as_text=True))
+
+    def test_99_subscription_page_defaults_off_and_hides_checkout_destinations(self):
+        html = self.client.get("/subscribe").get_data(as_text=True)
+        self.assertIn("현재 구독 결제 페이지를 준비 중입니다", html)
+        self.assertNotIn("payapp.kr", html.lower())
+        conn = connect(self.db_path)
+        settings = conn.execute("SELECT * FROM portal_settings WHERE id=1").fetchone()
+        conn.close()
+        self.assertEqual(settings["subscription_page_enabled"], 0)
+
+    def test_100_off_page_rejects_general_checkout_even_with_agreements(self):
+        csrf = self.set_csrf(self.client, "off-payment-csrf")
+        response = self.client.post(
+            "/subscribe/pay/one-month",
+            data={"csrf_token": csrf, "agree_terms": "yes", "agree_privacy": "yes"},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_101_admin_can_preview_checkout_while_page_is_off(self):
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "admin-preview-csrf"
+        page = self.client.get("/subscribe")
+        self.assertIn("관리자 미리보기", page.get_data(as_text=True))
+        response = self.client.post(
+            "/subscribe/pay/one-month",
+            data={
+                "csrf_token": "admin-preview-csrf",
+                "agree_terms": "yes",
+                "agree_privacy": "yes",
+            },
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["Location"], "https://www.payapp.kr/L/z49rzA")
+
+    def test_102_admin_can_enable_page_and_set_both_effective_dates(self):
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "settings-csrf"
+        response = self.client.post(
+            "/admin/portal-settings",
+            data={
+                "csrf_token": "settings-csrf",
+                "subscription_page_enabled": "1",
+                "terms_effective_date": "2026-10-01",
+                "privacy_effective_date": "2026-10-02",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        conn = connect(self.db_path)
+        settings = conn.execute("SELECT * FROM portal_settings WHERE id=1").fetchone()
+        conn.close()
+        self.assertEqual(settings["subscription_page_enabled"], 1)
+        self.assertEqual(settings["terms_effective_date"], "2026-10-01")
+        self.assertEqual(settings["privacy_effective_date"], "2026-10-02")
+        self.assertIn("2026년 10월 1일", self.client.get("/terms").get_data(as_text=True))
+        self.assertIn("2026년 10월 2일", self.client.get("/privacy").get_data(as_text=True))
+
+    def test_103_enabled_page_exposes_internal_checkout_flow_not_payapp_url(self):
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE portal_settings SET subscription_page_enabled=1 WHERE id=1")
+        html = self.client.get("/subscribe").get_data(as_text=True)
+        self.assertIn("/subscribe/pay/one-month", html)
+        self.assertIn("/subscribe/pay/three-month", html)
+        self.assertNotIn("payapp.kr", html.lower())
+        self.assertIn("disabled", html)
+
+    def test_104_checkout_requires_both_server_side_agreements(self):
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE portal_settings SET subscription_page_enabled=1 WHERE id=1")
+        csrf = self.set_csrf(self.client, "agreements-csrf")
+        cases = [
+            {},
+            {"agree_terms": "yes"},
+            {"agree_privacy": "yes"},
+        ]
+        for fields in cases:
+            with self.subTest(fields=fields):
+                response = self.client.post(
+                    "/subscribe/pay/one-month",
+                    data={"csrf_token": csrf, **fields},
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(urlsplit(response.headers["Location"]).path, "/subscribe")
+
+    def test_105_agreements_redirect_to_correct_one_month_payapp_url(self):
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE portal_settings SET subscription_page_enabled=1 WHERE id=1")
+        csrf = self.set_csrf(self.client, "one-month-csrf")
+        response = self.client.post(
+            "/subscribe/pay/one-month",
+            data={"csrf_token": csrf, "agree_terms": "yes", "agree_privacy": "yes"},
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["Location"], "https://www.payapp.kr/L/z49rzA")
+
+    def test_106_agreements_redirect_to_correct_three_month_payapp_url(self):
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE portal_settings SET subscription_page_enabled=1 WHERE id=1")
+        csrf = self.set_csrf(self.client, "three-month-csrf")
+        response = self.client.post(
+            "/subscribe/pay/three-month",
+            data={"csrf_token": csrf, "agree_terms": "yes", "agree_privacy": "yes"},
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["Location"], "https://www.payapp.kr/L/z49suD")
+
+    def test_107_unset_effective_dates_are_not_invented(self):
+        self.assertIn("시행일: 확정 전", self.client.get("/terms").get_data(as_text=True))
+        self.assertIn("시행일: 확정 전", self.client.get("/privacy").get_data(as_text=True))
+
+    def test_108_portal_settings_requires_admin_and_csrf(self):
+        self.assertEqual(self.client.get("/admin/portal-settings").status_code, 302)
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "expected-settings-csrf"
+        self.assertEqual(
+            self.client.post(
+                "/admin/portal-settings",
+                data={"subscription_page_enabled": "1"},
+            ).status_code,
+            400,
+        )
+
+    def test_109_checkout_requires_csrf_even_when_page_is_enabled(self):
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE portal_settings SET subscription_page_enabled=1 WHERE id=1")
+        self.assertEqual(
+            self.client.post(
+                "/subscribe/pay/one-month",
+                data={"agree_terms": "yes", "agree_privacy": "yes"},
+            ).status_code,
+            400,
+        )
+
+    def test_110_invalid_plan_does_not_redirect_to_external_site(self):
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE portal_settings SET subscription_page_enabled=1 WHERE id=1")
+        csrf = self.set_csrf(self.client, "invalid-plan-csrf")
+        response = self.client.post(
+            "/subscribe/pay/not-a-plan",
+            data={"csrf_token": csrf, "agree_terms": "yes", "agree_privacy": "yes"},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_111_additive_portal_settings_migration_preserves_existing_data(self):
+        old_path = str(Path(self.temp.name) / "old-portal.db")
+        conn = sqlite3.connect(old_path)
+        conn.executescript(
+            """
+            CREATE TABLE subscribers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT NOT NULL UNIQUE,
+                display_name TEXT,
+                email_hash TEXT UNIQUE,
+                is_test INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                is_paid_subscriber INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO subscribers(public_id,display_name,is_test,created_at)
+            VALUES('preserved-member','보존 회원',0,'2026-01-01T00:00:00+00:00');
+            """
+        )
+        conn.commit()
+        conn.close()
+        migrated = create_app({
+            "TESTING": True,
+            "SECRET_KEY": "migration-secret",
+            "DB_PATH": old_path,
+            "ENABLE_TEST_IDENTITY": False,
+            "SEED_DEMO_DATA": False,
+        })
+        self.assertIsNotNone(migrated)
+        conn = connect(old_path)
+        self.assertEqual(
+            conn.execute("SELECT display_name FROM subscribers WHERE public_id='preserved-member'").fetchone()[0],
+            "보존 회원",
+        )
+        self.assertEqual(
+            conn.execute("SELECT subscription_page_enabled FROM portal_settings WHERE id=1").fetchone()[0],
+            0,
+        )
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
