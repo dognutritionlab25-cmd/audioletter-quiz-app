@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block title %}{{ '게시글 수정' if mode == 'edit' else '새 게시글' }} · 반려견영양연구소{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('community.post_list') }}">← 구독자 게시판</a></p>
+<p class="eyebrow">SUBSCRIBER COMMUNITY</p>
+<h1>{{ '게시글 수정' if mode == 'edit' else '새 게시글' }}</h1>
+<section class="card">
+  <form method="post" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>제목<input name="title" maxlength="200" required value="{{ post.title if post else '' }}"></label>
+    <label>본문<textarea name="body" rows="12" maxlength="20000" required>{{ post.body if post else '' }}</textarea></label>
+    <button class="primary">{{ '수정 저장' if mode == 'edit' else '게시글 등록' }}</button>
+  </form>
+</section>
+{% endblock %}

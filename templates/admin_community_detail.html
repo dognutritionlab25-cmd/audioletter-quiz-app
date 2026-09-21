@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block title %}{{ post.title }} · 게시판 관리{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('community.admin_post_list') }}">← 게시판 관리</a></p>
+<article class="card">
+  <p class="eyebrow">ADMIN · {{ '공개' if post.is_visible else '숨김' }}</p>
+  <h1>{{ post.title }}</h1>
+  <p class="resource-meta">{{ post.author_name }} · {{ post.created_at|korean_datetime }} · 좋아요 {{ post.like_count }}</p>
+  <div class="community-body">{{ post.body }}</div>
+  <div class="resource-actions">
+    <form method="post" action="{{ url_for('community.admin_post_visibility', post_id=post.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="is_visible" value="{{ 0 if post.is_visible else 1 }}">
+      <button class="secondary">{{ '게시글 숨김' if post.is_visible else '다시 공개' }}</button>
+    </form>
+    <form method="post" action="{{ url_for('community.admin_post_delete', post_id=post.id) }}" onsubmit="return confirm('게시글과 댓글·좋아요를 모두 삭제하시겠습니까?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="secondary">게시글 삭제</button>
+    </form>
+  </div>
+</article>
+
+<h2>댓글 {{ comments|length }}</h2>
+<div class="stack community-comments">
+  {% for comment in comments %}
+  <section class="card">
+    <p class="resource-meta"><strong>{{ comment.author_name }}</strong> · {{ comment.created_at|korean_datetime }}</p>
+    <div class="community-comment-body">{{ comment.body }}</div>
+    <form method="post" action="{{ url_for('community.admin_comment_delete', comment_id=comment.id) }}" onsubmit="return confirm('이 댓글을 삭제하시겠습니까?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="link-danger">댓글 삭제</button>
+    </form>
+  </section>
+  {% else %}
+  <p class="empty">댓글이 없습니다.</p>
+  {% endfor %}
+</div>
+{% endblock %}

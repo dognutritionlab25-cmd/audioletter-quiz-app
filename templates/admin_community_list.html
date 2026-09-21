@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}게시판 관리 · 관리자{% endblock %}
+{% block content %}
+<div class="admin-head">
+  <div><p class="eyebrow">ADMIN</p><h1>게시판 관리</h1></div>
+  <a class="secondary button-link" href="{{ url_for('admin_dashboard') }}">관리자 홈</a>
+</div>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>제목</th><th>작성자</th><th>작성일</th><th>댓글</th><th>좋아요</th><th>상태</th></tr></thead>
+    <tbody>
+      {% for post in posts %}
+      <tr>
+        <td><a href="{{ url_for('community.admin_post_detail', post_id=post.id) }}">{{ post.title }}</a></td>
+        <td>{{ post.author_name }}</td>
+        <td>{{ post.created_at|korean_datetime }}</td>
+        <td>{{ post.comment_count }}</td>
+        <td>{{ post.like_count }}</td>
+        <td>{{ '공개' if post.is_visible else '숨김' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="empty">등록된 게시글이 없습니다.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
