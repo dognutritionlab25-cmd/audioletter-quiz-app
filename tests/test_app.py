@@ -1357,6 +1357,114 @@ class QuizAppTest(unittest.TestCase):
         )
         conn.close()
 
+    def test_65_admin_publishes_only_r001_through_r042_idempotently(self):
+        for number in range(1, 43):
+            code = f"R{number:03d}"
+            if code != "R041":
+                self.create_episode(code, published=False)
+
+        subscriber, episode, questions = self.ids()
+        attempt_id, _ = self.finish_attempt(subscriber, episode, questions)
+        conn = connect(self.db_path)
+        feedback_question = conn.execute(
+            "SELECT id FROM feedback_questions WHERE episode_id=? ORDER BY display_order LIMIT 1",
+            (episode["id"],),
+        ).fetchone()[0]
+        conn.close()
+        save_feedback(
+            self.db_path,
+            episode["id"],
+            subscriber,
+            {feedback_question: ["기존 피드백"]},
+        )
+
+        protected_tables = (
+            "subscribers", "questions", "choices", "quiz_attempts",
+            "attempt_answers", "participation", "feedback_questions",
+            "feedback_options", "feedback_submissions", "feedback_answers",
+        )
+        conn = connect(self.db_path)
+        before_counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in protected_tables
+        }
+        before_episode_metadata = {
+            row["code"]: tuple(row[key] for key in (
+                "id", "season_id", "title", "description", "display_order",
+                "created_at", "updated_at",
+            ))
+            for row in conn.execute(
+                """SELECT id,season_id,code,title,description,display_order,created_at,updated_at
+                   FROM episodes WHERE code BETWEEN 'R001' AND 'R042'"""
+            )
+        }
+        conn.close()
+
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "publish-season-one-csrf"
+
+        first = self.client.post(
+            "/admin/episodes/publish-season-1",
+            data={"csrf_token": "publish-season-one-csrf"},
+        )
+        second = self.client.post(
+            "/admin/episodes/publish-season-1",
+            data={"csrf_token": "publish-season-one-csrf"},
+        )
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(second.status_code, 302)
+
+        conn = connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                """SELECT COUNT(*) FROM episodes
+                   WHERE code BETWEEN 'R001' AND 'R042' AND is_published=1"""
+            ).fetchone()[0],
+            42,
+        )
+        after_counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in protected_tables
+        }
+        after_episode_metadata = {
+            row["code"]: tuple(row[key] for key in (
+                "id", "season_id", "title", "description", "display_order",
+                "created_at", "updated_at",
+            ))
+            for row in conn.execute(
+                """SELECT id,season_id,code,title,description,display_order,created_at,updated_at
+                   FROM episodes WHERE code BETWEEN 'R001' AND 'R042'"""
+            )
+        }
+        self.assertIsNotNone(
+            conn.execute("SELECT id FROM quiz_attempts WHERE id=?", (attempt_id,)).fetchone()
+        )
+        conn.close()
+        self.assertEqual(after_counts, before_counts)
+        self.assertEqual(after_episode_metadata, before_episode_metadata)
+
+    def test_66_season_one_publish_requires_all_42_episodes(self):
+        self.create_episode("R001", published=False)
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "publish-incomplete-season-csrf"
+
+        response = self.client.post(
+            "/admin/episodes/publish-season-1",
+            data={"csrf_token": "publish-incomplete-season-csrf"},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT is_published FROM episodes WHERE code='R001'"
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
