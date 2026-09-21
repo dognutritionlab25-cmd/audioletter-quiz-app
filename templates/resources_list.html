@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block title %}자료실 · 반려견영양연구소{% endblock %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">SUBSCRIBER RESOURCES</p>
+  <h1>자료실</h1>
+  <p>오디오레터와 반려견 영양 학습에 도움이 되는 자료를 모았습니다.</p>
+</section>
+<section class="stack">
+  {% for resource in resources %}
+  <a class="card row-card resource-card" href="{{ url_for('resources.resource_detail', resource_id=resource.id) }}">
+    <span>
+      <span class="resource-category">{{ resource.category }}</span>
+      <h2>{{ resource.title }}</h2>
+      <span class="resource-meta">{{ resource.created_at|korean_datetime }}</span>
+    </span>
+    <span aria-hidden="true">›</span>
+  </a>
+  {% else %}
+  <div class="empty">아직 공개된 자료가 없습니다.</div>
+  {% endfor %}
+</section>
+{% endblock %}

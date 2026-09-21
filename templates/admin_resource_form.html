@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block title %}{{ '자료 수정' if resource_id else '새 자료' }} · 관리자{% endblock %}
+{% block content %}
+<div class="admin-head">
+  <h1>{{ '자료 수정' if resource_id else '새 자료' }}</h1>
+  <a class="secondary button-link" href="{{ url_for('resources.admin_resource_list') }}">목록으로</a>
+</div>
+<section class="card">
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label class="wide">제목<input name="title" required maxlength="200" value="{{ resource.title if resource else '' }}"></label>
+    <label>카테고리<input name="category" required maxlength="100" value="{{ resource.category if resource else '' }}" placeholder="예: 식단 가이드"></label>
+    <label>외부 링크<input type="url" name="external_url" value="{{ resource.external_url if resource and resource.external_url else '' }}" placeholder="https://..."></label>
+    <label class="wide">본문<textarea name="body" rows="12" required>{{ resource.body if resource else '' }}</textarea></label>
+    <label class="inline"><input type="checkbox" name="is_published" {% if resource and resource.is_published %}checked{% endif %}> 공개</label>
+    <button class="primary">저장</button>
+  </form>
+</section>
+{% endblock %}

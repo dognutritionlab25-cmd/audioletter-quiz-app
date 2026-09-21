@@ -10,7 +10,7 @@
   <header class="topbar">
     <a href="{{ url_for('index') }}" class="brand">반려견영양연구소</a>
     <nav>
-      {% if session.get('subscriber_id') %}<a href="{{ url_for('my_history') }}">나의 참여</a>{% endif %}
+      {% if session.get('subscriber_id') %}<a href="{{ url_for('resources.resource_list') }}">자료실</a><a href="{{ url_for('my_history') }}">나의 참여</a>{% endif %}
       {% if session.get('is_admin') %}<a href="{{ url_for('admin_dashboard') }}">관리자</a>{% endif %}
     </nav>
   </header>
@@ -22,4 +22,3 @@
   </main>
 </body>
 </html>
-

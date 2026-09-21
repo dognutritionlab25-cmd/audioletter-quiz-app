@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% block title %}자료실 관리 · 관리자{% endblock %}
+{% block content %}
+<div class="admin-head">
+  <div><p class="eyebrow">ADMIN</p><h1>자료실 관리</h1></div>
+  <div><a class="secondary button-link" href="{{ url_for('admin_dashboard') }}">관리자 홈</a> <a class="primary button-link" href="{{ url_for('resources.admin_resource_new') }}">새 자료</a></div>
+</div>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>제목</th><th>카테고리</th><th>작성일</th><th>상태</th><th></th></tr></thead>
+    <tbody>
+      {% for resource in resources %}
+      <tr>
+        <td><strong>{{ resource.title }}</strong></td>
+        <td>{{ resource.category }}</td>
+        <td>{{ resource.created_at|korean_datetime }}</td>
+        <td>{{ '공개' if resource.is_published else '비공개' }}</td>
+        <td>
+          <a href="{{ url_for('resources.admin_resource_edit', resource_id=resource.id) }}">수정</a>
+          <form class="inline-form" method="post" action="{{ url_for('resources.admin_resource_delete', resource_id=resource.id) }}" onsubmit="return confirm('이 자료를 삭제하시겠습니까?');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="link-danger">삭제</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="empty">등록된 자료가 없습니다.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

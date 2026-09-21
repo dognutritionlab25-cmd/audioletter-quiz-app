@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+{% block title %}{{ resource.title }} · 자료실{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('resources.resource_list') }}">← 자료실</a></p>
+<article class="card">
+  <span class="resource-category">{{ resource.category }}</span>
+  <h1>{{ resource.title }}</h1>
+  <p class="resource-meta">작성 {{ resource.created_at|korean_datetime }}</p>
+  <div class="resource-body">{{ resource.body }}</div>
+  {% if resource.external_url %}
+  <a class="primary button-link" href="{{ resource.external_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">외부 자료 열기</a>
+  {% endif %}
+</article>
+{% endblock %}
