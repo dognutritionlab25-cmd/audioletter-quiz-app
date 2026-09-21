@@ -176,6 +176,15 @@ CREATE TABLE IF NOT EXISTS community_likes (
     UNIQUE(post_id, subscriber_id)
 );
 
+CREATE TABLE IF NOT EXISTS portal_settings (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    subscription_page_enabled INTEGER NOT NULL DEFAULT 0
+        CHECK(subscription_page_enabled IN (0,1)),
+    terms_effective_date TEXT,
+    privacy_effective_date TEXT,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_questions_episode ON questions(episode_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_attempts_subscriber_episode ON quiz_attempts(subscriber_id, episode_id);
 CREATE INDEX IF NOT EXISTS idx_participation_subscriber ON participation(subscriber_id);
@@ -239,6 +248,13 @@ def init_db(path):
             "subscribers",
             "is_paid_subscriber",
             "INTEGER NOT NULL DEFAULT 0 CHECK(is_paid_subscriber IN (0,1))",
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO portal_settings
+               (id,subscription_page_enabled,terms_effective_date,
+                privacy_effective_date,updated_at)
+               VALUES(1,0,NULL,NULL,?)""",
+            (utcnow(),),
         )
 
 

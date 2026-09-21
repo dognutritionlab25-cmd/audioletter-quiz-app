@@ -19,6 +19,7 @@
 - 로그인 구독자용 자료실과 관리자 자료 CRUD(외부 링크, 공개/비공개)
 - Google Sheet/Make에서 전달받은 유료 상태와 현재 유료 구독자 전용 게시판
 - 구독자 게시글·댓글·좋아요와 관리자 숨김/삭제·새 글 이메일 알림
+- 공개 구독 안내·이용약관·개인정보처리방침과 관리자 결제 공개 설정
 
 ## 파일 구조
 
@@ -33,6 +34,7 @@ importers.py           Forms/응답/피드백 변환 계층
 quiz_csv_import.py     관리자 퀴즈 CSV 검증·중복 판정·Import
 resources.py           자료실 구독자 화면과 관리자 CRUD Blueprint
 community.py           유료 구독자 게시판과 관리자 관리 Blueprint
+public_pages.py        공개 안내·약관·개인정보·PayApp 이동·관리자 설정 Blueprint
 manage.py              관리·import CLI
 templates/             모바일/관리자 화면
 static/style.css       반응형 UI
@@ -104,10 +106,20 @@ python app.py
 - `resources`: 자료 제목·본문·카테고리·외부 링크·공개 상태와 작성/수정 시각
 - `subscribers.is_paid_subscriber`: Google Sheet/Make가 판단한 현재 유료 구독 상태. `is_active`와 별도
 - `community_posts`, `community_comments`, `community_likes`: 게시글·댓글·게시글별 subscriber 1회 좋아요
+- `portal_settings`: 결제 안내 공개 여부와 이용약관·개인정보처리방침 시행일(단일 설정 행)
 
 `resources` 테이블은 앱 시작 시 `CREATE TABLE IF NOT EXISTS`로 추가됩니다. 기존 테이블이나 행을 변경·삭제하지 않는 additive schema 초기화입니다. 관리자는 `/admin/resources`, 로그인한 구독자는 `/resources`를 사용합니다.
 
 게시판 테이블도 같은 additive 초기화 방식으로 추가됩니다. 기존 subscriber에는 `is_paid_subscriber=0`이 적용되며 앱이 실제 유료 여부를 추측하지 않습니다. Google Sheet가 계산한 결과를 Make가 sync API의 `is_paid_subscriber` boolean으로 보내야 합니다. 필드를 보내지 않으면 기존 paid 값은 유지됩니다.
+
+## 공개 구독 안내와 법적 고지
+
+- `/subscribe`: 서비스·플랜·환불 핵심 안내. `portal_settings.subscription_page_enabled=0`이 기본값이며, 이때 일반 방문자는 결제할 수 없습니다.
+- `/terms`, `/privacy`: 로그인 없이 열람할 수 있습니다. 시행일은 관리자 설정을 사용하며 비어 있으면 `확정 전`으로 표시합니다.
+- `/admin/portal-settings`: 관리자가 결제 페이지 공개 여부와 두 시행일을 저장합니다. 공개 OFF 상태에서도 로그인한 관리자는 결제 흐름을 미리 볼 수 있습니다.
+- PayApp 주소는 `public_pages.py`의 `PAYMENT_PLANS` 한 곳에서 관리합니다. 브라우저에는 내부 POST route만 제공되며, 공개 여부·CSRF·두 필수 동의를 서버에서 확인한 뒤 외부 결제 페이지로 이동합니다.
+
+이 기능에 필요한 새 환경변수는 없습니다. 배포 직후 기본 상태는 결제 페이지 **OFF**이므로, 약관·개인정보처리방침의 시행일과 화면 내용을 확인한 뒤 관리자가 명시적으로 공개해야 합니다.
 
 ### Make의 유료 상태 전달
 

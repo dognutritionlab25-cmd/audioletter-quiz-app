@@ -30,6 +30,7 @@ from magic_links import (
     send_magic_link_via_brevo,
 )
 from presenters import feedback_summary, format_korean_datetime
+from public_pages import public_pages_bp
 from quiz_csv_import import import_quiz_rows, parse_quiz_csv, preview_quiz_import
 from resources import resources_bp
 from services import (
@@ -97,6 +98,7 @@ def create_app(test_config=None):
     app.jinja_env.filters["korean_datetime"] = format_korean_datetime
     app.register_blueprint(resources_bp)
     app.register_blueprint(community_bp)
+    app.register_blueprint(public_pages_bp)
 
     @app.before_request
     def verify_csrf():
