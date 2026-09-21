@@ -12,7 +12,12 @@ from urllib.parse import parse_qs, urlsplit
 from app import create_app, create_default_feedback, seed_demo
 from db import connect, transaction, utcnow
 from importers import import_google_form_payload, migrate_anonymous_feedback, migrate_historical_responses
-from magic_links import MagicLinkDeliveryError, create_magic_link_token, send_magic_link_via_brevo
+from magic_links import (
+    MagicLinkDeliveryError,
+    create_magic_link_token,
+    send_community_post_notification_via_brevo,
+    send_magic_link_via_brevo,
+)
 from presenters import feedback_summary, format_korean_datetime
 from quiz_csv_import import import_quiz_rows, parse_quiz_csv, preview_quiz_import
 from services import complete_attempt, email_hash, save_answer, save_feedback, start_attempt, subscriber_counts
@@ -25,6 +30,7 @@ class QuizAppTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.temp.name) / "test.db")
+        self.community_notifications = []
         self.app = create_app({
             "TESTING": True,
             "SECRET_KEY": "test-secret",
@@ -34,6 +40,9 @@ class QuizAppTest(unittest.TestCase):
             "SEED_DEMO_DATA": False,
             "MIGRATION_HASH_SECRET": "migration-test-secret",
             "SUBSCRIBER_SYNC_API_KEY": "sync-test-secret",
+            "COMMUNITY_NOTIFICATION_SENDER": (
+                lambda *args: self.community_notifications.append(args)
+            ),
         })
         seed_demo(self.db_path)
         self.client = self.app.test_client()
@@ -169,6 +178,47 @@ class QuizAppTest(unittest.TestCase):
                 (
                     title, body, category, external_url,
                     int(published), created_at, created_at,
+                ),
+            ).lastrowid
+
+    def create_community_subscriber(
+        self, email, display_name, paid=True, active=True
+    ):
+        public_id = "sub_" + email.split("@", 1)[0].replace(".", "_")
+        with transaction(self.db_path) as conn:
+            return conn.execute(
+                """INSERT INTO subscribers
+                   (public_id,display_name,email_hash,is_test,is_active,is_paid_subscriber,created_at)
+                   VALUES(?,?,?,0,?,?,?)""",
+                (
+                    public_id,
+                    display_name,
+                    email_hash(email, "migration-test-secret"),
+                    int(active),
+                    int(paid),
+                    utcnow(),
+                ),
+            ).lastrowid
+
+    def login_community_subscriber(self, subscriber_id, csrf="community-csrf"):
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+            state["csrf_token"] = csrf
+        return csrf
+
+    def create_community_post(self, subscriber_id, title="게시글", visible=True):
+        with transaction(self.db_path) as conn:
+            return conn.execute(
+                """INSERT INTO community_posts
+                   (subscriber_id,title,body,is_visible,created_at,updated_at)
+                   VALUES(?,?,?, ?,?,?)""",
+                (
+                    subscriber_id,
+                    title,
+                    "게시글 본문",
+                    int(visible),
+                    utcnow(),
+                    utcnow(),
                 ),
             ).lastrowid
 
@@ -1767,6 +1817,473 @@ class QuizAppTest(unittest.TestCase):
         conn = connect(self.db_path)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM resources").fetchone()[0], 0)
         conn.close()
+
+    def test_78_paid_migration_is_additive_and_creates_community_tables(self):
+        legacy_db = str(Path(self.temp.name) / "paid-upgrade.db")
+        raw = sqlite3.connect(legacy_db)
+        raw.execute(
+            """CREATE TABLE subscribers (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT NOT NULL UNIQUE,
+               display_name TEXT, email_hash TEXT UNIQUE, is_test INTEGER NOT NULL DEFAULT 0,
+               is_active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)"""
+        )
+        raw.execute(
+            """INSERT INTO subscribers
+               (public_id,display_name,is_test,is_active,created_at)
+               VALUES('legacy-paid-check','보존 대상',0,1,?)""",
+            (utcnow(),),
+        )
+        raw.commit()
+        raw.close()
+        create_app({
+            "TESTING": True,
+            "SECRET_KEY": "paid-upgrade-secret",
+            "DB_PATH": legacy_db,
+            "ENABLE_TEST_IDENTITY": False,
+            "SEED_DEMO_DATA": False,
+        })
+        conn = connect(legacy_db)
+        person = conn.execute(
+            """SELECT display_name,is_active,is_paid_subscriber
+               FROM subscribers WHERE public_id='legacy-paid-check'"""
+        ).fetchone()
+        tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        conn.close()
+        self.assertEqual(dict(person), {
+            "display_name": "보존 대상", "is_active": 1, "is_paid_subscriber": 0,
+        })
+        self.assertTrue({
+            "community_posts", "community_comments", "community_likes"
+        }.issubset(tables))
+
+    def test_79_sync_without_paid_field_is_backward_compatible(self):
+        subscriber_id = self.create_community_subscriber(
+            "kept-paid@example.invalid", "유료 유지", paid=True
+        )
+        response = self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": " KEPT-PAID@example.invalid ", "display_name": "변경 안 됨"},
+        )
+        self.assertEqual(response.status_code, 200)
+        conn = connect(self.db_path)
+        person = conn.execute(
+            "SELECT id,is_active,is_paid_subscriber FROM subscribers WHERE id=?",
+            (subscriber_id,),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(person["is_active"], 1)
+        self.assertEqual(person["is_paid_subscriber"], 1)
+
+        created = self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": "new-free@example.invalid"},
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertFalse(created.get_json()["subscriber"]["is_paid_subscriber"])
+
+    def test_80_sync_explicit_paid_true_false_keeps_account_active(self):
+        headers = {"Authorization": "Bearer sync-test-secret"}
+        created = self.client.post(
+            "/api/subscribers/sync",
+            headers=headers,
+            json={
+                "email": "paid-sync@example.invalid",
+                "is_paid_subscriber": True,
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertTrue(created.get_json()["subscriber"]["active"])
+        self.assertTrue(created.get_json()["subscriber"]["is_paid_subscriber"])
+
+        ended = self.client.post(
+            "/api/subscribers/sync",
+            headers=headers,
+            json={
+                "email": "paid-sync@example.invalid",
+                "is_paid_subscriber": False,
+            },
+        )
+        self.assertEqual(ended.status_code, 200)
+        self.assertTrue(ended.get_json()["subscriber"]["active"])
+        self.assertFalse(ended.get_json()["subscriber"]["is_paid_subscriber"])
+
+    def test_81_sync_rejects_non_boolean_paid_status(self):
+        response = self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": "bad-paid@example.invalid", "is_paid_subscriber": "true"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json()["error"],
+            "is_paid_subscriber must be a boolean",
+        )
+
+    def test_82_community_requires_login_and_paid_status_only(self):
+        unauthenticated = self.client.get("/community")
+        self.assertEqual(unauthenticated.status_code, 302)
+
+        free_id = self.create_community_subscriber(
+            "free@example.invalid", "무료 구독자", paid=False
+        )
+        self.login_community_subscriber(free_id)
+        blocked = self.client.get("/community")
+        self.assertEqual(blocked.status_code, 403)
+        self.assertIn("현재 유료 구독자 전용 공간입니다.", blocked.get_data(as_text=True))
+        self.assertEqual(self.client.get("/resources").status_code, 200)
+        self.assertEqual(self.client.get("/quiz?episode=R041").status_code, 200)
+
+    def test_83_paid_access_end_and_resubscribe_do_not_change_is_active(self):
+        subscriber_id = self.create_community_subscriber(
+            "cycle@example.invalid", "재구독자", paid=True
+        )
+        self.login_community_subscriber(subscriber_id)
+        self.assertEqual(self.client.get("/community").status_code, 200)
+
+        headers = {"Authorization": "Bearer sync-test-secret"}
+        self.client.post(
+            "/api/subscribers/sync", headers=headers,
+            json={"email": "cycle@example.invalid", "is_paid_subscriber": False},
+        )
+        self.assertEqual(self.client.get("/community").status_code, 403)
+        self.client.post(
+            "/api/subscribers/sync", headers=headers,
+            json={"email": "cycle@example.invalid", "is_paid_subscriber": True},
+        )
+        self.assertEqual(self.client.get("/community").status_code, 200)
+        conn = connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT is_active FROM subscribers WHERE id=?", (subscriber_id,)
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
+    def test_84_paid_subscriber_creates_post_and_admin_notification(self):
+        subscriber_id = self.create_community_subscriber(
+            "writer@example.invalid", "글쓴이", paid=True
+        )
+        csrf = self.login_community_subscriber(subscriber_id)
+        response = self.client.post(
+            "/community/new",
+            data={"csrf_token": csrf, "title": "새 질문", "body": "궁금한 내용"},
+        )
+        self.assertEqual(response.status_code, 302)
+        conn = connect(self.db_path)
+        post = conn.execute(
+            "SELECT * FROM community_posts WHERE subscriber_id=?", (subscriber_id,)
+        ).fetchone()
+        conn.close()
+        self.assertEqual(post["title"], "새 질문")
+        self.assertEqual(len(self.community_notifications), 1)
+        self.assertEqual(self.community_notifications[0][0:3], (
+            "새 질문", "글쓴이", self.community_notifications[0][2]
+        ))
+        self.assertIn(f"/admin/community/{post['id']}", self.community_notifications[0][3])
+
+    def test_85_notification_failure_does_not_rollback_post(self):
+        subscriber_id = self.create_community_subscriber(
+            "notify-fail@example.invalid", "알림 실패", paid=True
+        )
+        self.app.config["COMMUNITY_NOTIFICATION_SENDER"] = (
+            lambda *args: (_ for _ in ()).throw(RuntimeError("delivery failed"))
+        )
+        csrf = self.login_community_subscriber(subscriber_id)
+        response = self.client.post(
+            "/community/new",
+            data={"csrf_token": csrf, "title": "저장 유지", "body": "본문"},
+        )
+        self.assertEqual(response.status_code, 302)
+        conn = connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM community_posts WHERE title='저장 유지'"
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
+    def test_86_post_owner_can_edit_and_delete_with_dependents(self):
+        subscriber_id = self.create_community_subscriber(
+            "owner@example.invalid", "소유자", paid=True
+        )
+        post_id = self.create_community_post(subscriber_id)
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO community_comments(post_id,subscriber_id,body,created_at) VALUES(?,?,?,?)",
+                (post_id, subscriber_id, "댓글", utcnow()),
+            )
+            conn.execute(
+                "INSERT INTO community_likes(post_id,subscriber_id,created_at) VALUES(?,?,?)",
+                (post_id, subscriber_id, utcnow()),
+            )
+        csrf = self.login_community_subscriber(subscriber_id)
+        edited = self.client.post(
+            f"/community/{post_id}/edit",
+            data={"csrf_token": csrf, "title": "수정 제목", "body": "수정 본문"},
+        )
+        self.assertEqual(edited.status_code, 302)
+        deleted = self.client.post(
+            f"/community/{post_id}/delete", data={"csrf_token": csrf}
+        )
+        self.assertEqual(deleted.status_code, 302)
+        conn = connect(self.db_path)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM community_posts").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM community_comments").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM community_likes").fetchone()[0], 0)
+        conn.close()
+
+    def test_87_other_subscriber_cannot_edit_or_delete_post(self):
+        owner_id = self.create_community_subscriber(
+            "owner2@example.invalid", "소유자", paid=True
+        )
+        other_id = self.create_community_subscriber(
+            "other2@example.invalid", "다른 구독자", paid=True
+        )
+        post_id = self.create_community_post(owner_id)
+        csrf = self.login_community_subscriber(other_id)
+        self.assertEqual(self.client.get(f"/community/{post_id}/edit").status_code, 403)
+        self.assertEqual(
+            self.client.post(
+                f"/community/{post_id}/delete", data={"csrf_token": csrf}
+            ).status_code,
+            403,
+        )
+        conn = connect(self.db_path)
+        self.assertIsNotNone(
+            conn.execute("SELECT id FROM community_posts WHERE id=?", (post_id,)).fetchone()
+        )
+        conn.close()
+
+    def test_88_comment_owner_delete_and_other_delete_forbidden(self):
+        owner_id = self.create_community_subscriber(
+            "commenter@example.invalid", "댓글 작성자", paid=True
+        )
+        other_id = self.create_community_subscriber(
+            "other-comment@example.invalid", "다른 사람", paid=True
+        )
+        post_id = self.create_community_post(owner_id)
+        csrf = self.login_community_subscriber(owner_id)
+        created = self.client.post(
+            f"/community/{post_id}/comments",
+            data={"csrf_token": csrf, "body": "첫 댓글"},
+        )
+        self.assertEqual(created.status_code, 302)
+        conn = connect(self.db_path)
+        comment_id = conn.execute("SELECT id FROM community_comments").fetchone()[0]
+        conn.close()
+
+        other_csrf = self.login_community_subscriber(other_id, "other-comment-csrf")
+        self.assertEqual(
+            self.client.post(
+                f"/community/comments/{comment_id}/delete",
+                data={"csrf_token": other_csrf},
+            ).status_code,
+            403,
+        )
+        owner_csrf = self.login_community_subscriber(owner_id, "owner-comment-csrf")
+        self.assertEqual(
+            self.client.post(
+                f"/community/comments/{comment_id}/delete",
+                data={"csrf_token": owner_csrf},
+            ).status_code,
+            302,
+        )
+
+    def test_89_likes_toggle_uniquely_and_count_each_subscriber(self):
+        first_id = self.create_community_subscriber(
+            "like-one@example.invalid", "첫 번째", paid=True
+        )
+        second_id = self.create_community_subscriber(
+            "like-two@example.invalid", "두 번째", paid=True
+        )
+        post_id = self.create_community_post(first_id)
+        csrf = self.login_community_subscriber(first_id)
+        self.client.post(f"/community/{post_id}/like", data={"csrf_token": csrf})
+        self.client.post(f"/community/{post_id}/like", data={"csrf_token": csrf})
+        self.client.post(f"/community/{post_id}/like", data={"csrf_token": csrf})
+        second_csrf = self.login_community_subscriber(second_id, "second-like-csrf")
+        self.client.post(
+            f"/community/{post_id}/like", data={"csrf_token": second_csrf}
+        )
+        conn = connect(self.db_path)
+        likes = conn.execute(
+            "SELECT subscriber_id FROM community_likes WHERE post_id=? ORDER BY subscriber_id",
+            (post_id,),
+        ).fetchall()
+        conn.close()
+        self.assertEqual([row[0] for row in likes], sorted([first_id, second_id]))
+
+    def test_90_admin_can_hide_and_subscriber_cannot_discover_or_open_post(self):
+        subscriber_id = self.create_community_subscriber(
+            "hidden@example.invalid", "작성자", paid=True
+        )
+        post_id = self.create_community_post(subscriber_id, title="숨길 글")
+        with self.client.session_transaction() as state:
+            state.clear()
+            state["is_admin"] = True
+            state["csrf_token"] = "admin-hide-csrf"
+        admin_page = self.client.get("/admin/community")
+        self.assertIn("숨길 글", admin_page.get_data(as_text=True))
+        hidden = self.client.post(
+            f"/admin/community/{post_id}/visibility",
+            data={"csrf_token": "admin-hide-csrf", "is_visible": "0"},
+        )
+        self.assertEqual(hidden.status_code, 302)
+
+        self.login_community_subscriber(subscriber_id, "hidden-subscriber-csrf")
+        listing = self.client.get("/community").get_data(as_text=True)
+        self.assertNotIn("숨길 글", listing)
+        self.assertEqual(self.client.get(f"/community/{post_id}").status_code, 404)
+
+    def test_91_admin_can_delete_any_comment_and_post(self):
+        subscriber_id = self.create_community_subscriber(
+            "admin-delete@example.invalid", "작성자", paid=True
+        )
+        post_id = self.create_community_post(subscriber_id)
+        with transaction(self.db_path) as conn:
+            comment_id = conn.execute(
+                "INSERT INTO community_comments(post_id,subscriber_id,body,created_at) VALUES(?,?,?,?)",
+                (post_id, subscriber_id, "관리 댓글", utcnow()),
+            ).lastrowid
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "admin-delete-csrf"
+        self.assertEqual(
+            self.client.post(
+                f"/admin/community/comments/{comment_id}/delete",
+                data={"csrf_token": "admin-delete-csrf"},
+            ).status_code,
+            302,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/admin/community/{post_id}/delete",
+                data={"csrf_token": "admin-delete-csrf"},
+            ).status_code,
+            302,
+        )
+
+    def test_92_subscription_end_preserves_existing_post_and_comment(self):
+        subscriber_id = self.create_community_subscriber(
+            "preserved@example.invalid", "보존 작성자", paid=True
+        )
+        post_id = self.create_community_post(subscriber_id)
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO community_comments(post_id,subscriber_id,body,created_at) VALUES(?,?,?,?)",
+                (post_id, subscriber_id, "보존 댓글", utcnow()),
+            )
+        self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": "preserved@example.invalid", "is_paid_subscriber": False},
+        )
+        self.login_community_subscriber(subscriber_id)
+        self.assertEqual(self.client.get("/community").status_code, 403)
+        conn = connect(self.db_path)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM community_posts").fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM community_comments").fetchone()[0], 1)
+        conn.close()
+
+    def test_93_community_post_routes_require_csrf(self):
+        subscriber_id = self.create_community_subscriber(
+            "csrf-community@example.invalid", "CSRF 확인", paid=True
+        )
+        post_id = self.create_community_post(subscriber_id)
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+            state["csrf_token"] = "expected-csrf"
+        routes = [
+            ("/community/new", {"title": "제목", "body": "본문"}),
+            (f"/community/{post_id}/delete", {}),
+            (f"/community/{post_id}/comments", {"body": "댓글"}),
+            (f"/community/{post_id}/like", {}),
+        ]
+        for route, data in routes:
+            with self.subTest(route=route):
+                self.assertEqual(self.client.post(route, data=data).status_code, 400)
+
+    def test_94_community_user_input_is_html_escaped(self):
+        subscriber_id = self.create_community_subscriber(
+            "escape@example.invalid", "<b>작성자</b>", paid=True
+        )
+        post_id = self.create_community_post(
+            subscriber_id, title="<script>alert(1)</script>"
+        )
+        self.login_community_subscriber(subscriber_id)
+        html = self.client.get(f"/community/{post_id}").get_data(as_text=True)
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+        self.assertNotIn("<b>작성자</b>", html)
+
+    def test_95_community_brevo_notification_uses_admin_recipient_without_member_email(self):
+        class FakeResponse:
+            status = 201
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        config = {
+            "BREVO_API_KEY": "test-api-key",
+            "MAGIC_LINK_SENDER_EMAIL": "sender@example.invalid",
+            "MAGIC_LINK_SENDER_NAME": "반려견영양연구소",
+            "COMMUNITY_ADMIN_NOTIFICATION_EMAIL": "admin@example.invalid",
+            "BREVO_TIMEOUT_SECONDS": 10,
+        }
+        with patch("magic_links.urllib.request.urlopen", return_value=FakeResponse()) as mocked:
+            send_community_post_notification_via_brevo(
+                "<새 글>",
+                "작성자",
+                "2026.09.21 18:00",
+                "https://portal.example.invalid/admin/community/1",
+                config,
+            )
+        request = mocked.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["to"], [{"email": "admin@example.invalid"}])
+        self.assertIn("&lt;새 글&gt;", payload["htmlContent"])
+        self.assertNotIn("member@example.invalid", request.data.decode("utf-8"))
+
+    def test_96_subscriber_cannot_access_community_admin_routes(self):
+        subscriber_id = self.create_community_subscriber(
+            "not-admin@example.invalid", "일반 구독자", paid=True
+        )
+        post_id = self.create_community_post(subscriber_id)
+        csrf = self.login_community_subscriber(subscriber_id)
+        self.assertEqual(self.client.get("/admin/community").status_code, 302)
+        self.assertEqual(
+            self.client.post(
+                f"/admin/community/{post_id}/delete",
+                data={"csrf_token": csrf},
+            ).status_code,
+            302,
+        )
+        conn = connect(self.db_path)
+        self.assertIsNotNone(
+            conn.execute("SELECT id FROM community_posts WHERE id=?", (post_id,)).fetchone()
+        )
+        conn.close()
+
+    def test_97_inactive_paid_subscriber_is_not_allowed_into_community(self):
+        subscriber_id = self.create_community_subscriber(
+            "inactive-paid@example.invalid", "비활성 유료", paid=True, active=False
+        )
+        self.login_community_subscriber(subscriber_id)
+        response = self.client.get("/community")
+        self.assertEqual(response.status_code, 302)
+        with self.client.session_transaction() as state:
+            self.assertNotIn("subscriber_id", state)
 
 
 if __name__ == "__main__":
