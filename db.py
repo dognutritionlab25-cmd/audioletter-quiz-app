@@ -138,12 +138,25 @@ CREATE TABLE IF NOT EXISTS feedback_answers (
     value_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS resources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL,
+    external_url TEXT,
+    is_published INTEGER NOT NULL DEFAULT 0 CHECK(is_published IN (0,1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_questions_episode ON questions(episode_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_attempts_subscriber_episode ON quiz_attempts(subscriber_id, episode_id);
 CREATE INDEX IF NOT EXISTS idx_participation_subscriber ON participation(subscriber_id);
 CREATE INDEX IF NOT EXISTS idx_legacy_participation_subscriber ON legacy_participation(subscriber_id);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_expiry ON magic_link_tokens(expires_at, used_at);
 CREATE INDEX IF NOT EXISTS idx_feedback_episode ON feedback_submissions(episode_id);
+CREATE INDEX IF NOT EXISTS idx_resources_published_created
+    ON resources(is_published, created_at DESC, id DESC);
 """
 
 

@@ -16,6 +16,7 @@
 - Brevo Transactional Email 기반 일회용 Magic Link 인증과 180일 장기 세션
 - 관리자 구독자 등록·활성 상태 관리와 시즌1 과거 참여 횟수 수동 반영
 - 관리자 Preview/검증 기반 퀴즈 CSV 일괄 Import
+- 로그인 구독자용 자료실과 관리자 자료 CRUD(외부 링크, 공개/비공개)
 
 ## 파일 구조
 
@@ -28,6 +29,7 @@ presenters.py           관리자 표시용 날짜·피드백 변환
 services.py            Quiz·참여·피드백 core
 importers.py           Forms/응답/피드백 변환 계층
 quiz_csv_import.py     관리자 퀴즈 CSV 검증·중복 판정·Import
+resources.py           자료실 구독자 화면과 관리자 CRUD Blueprint
 manage.py              관리·import CLI
 templates/             모바일/관리자 화면
 static/style.css       반응형 UI
@@ -95,6 +97,9 @@ python app.py
 - `magic_link_tokens`: subscriber, token SHA-256 hash, 내부 redirect, 만료·사용 시각
 - `feedback_questions`, `feedback_options`: 변경 가능한 피드백 문항 정의
 - `feedback_submissions`, `feedback_answers`: 회원 또는 과거 익명 피드백
+- `resources`: 자료 제목·본문·카테고리·외부 링크·공개 상태와 작성/수정 시각
+
+`resources` 테이블은 앱 시작 시 `CREATE TABLE IF NOT EXISTS`로 추가됩니다. 기존 테이블이나 행을 변경·삭제하지 않는 additive schema 초기화입니다. 관리자는 `/admin/resources`, 로그인한 구독자는 `/resources`를 사용합니다.
 
 ## 인증과 Quiz core의 분리
 
