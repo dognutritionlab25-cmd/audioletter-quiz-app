@@ -1,5 +1,5 @@
 from functools import wraps
-from flask import abort, current_app, redirect, request, session, url_for
+from flask import abort, current_app, redirect, render_template, request, session, url_for
 from db import connect
 
 
@@ -35,6 +35,38 @@ def subscriber_required(view):
             if current_app.config["ENABLE_TEST_IDENTITY"]:
                 return redirect(url_for("test_identity", next=request.full_path))
             return redirect(url_for("magic_link_request", next=request.full_path))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def current_subscriber_is_paid():
+    subscriber_id = current_subscriber_id()
+    if subscriber_id is None:
+        return False
+    conn = connect(current_app.config["DB_PATH"])
+    subscriber = conn.execute(
+        """SELECT is_test,is_active,is_paid_subscriber
+           FROM subscribers WHERE id=?""",
+        (subscriber_id,),
+    ).fetchone()
+    conn.close()
+    return bool(
+        subscriber
+        and subscriber["is_active"]
+        and subscriber["is_paid_subscriber"]
+        and (
+            not subscriber["is_test"]
+            or current_app.config["ENABLE_TEST_IDENTITY"]
+        )
+    )
+
+
+def paid_subscriber_required(view):
+    @wraps(view)
+    @subscriber_required
+    def wrapped(*args, **kwargs):
+        if not current_subscriber_is_paid():
+            return render_template("paid_subscriber_required.html"), 403
         return view(*args, **kwargs)
     return wrapped
 

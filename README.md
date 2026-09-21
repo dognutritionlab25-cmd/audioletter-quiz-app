@@ -17,6 +17,8 @@
 - 관리자 구독자 등록·활성 상태 관리와 시즌1 과거 참여 횟수 수동 반영
 - 관리자 Preview/검증 기반 퀴즈 CSV 일괄 Import
 - 로그인 구독자용 자료실과 관리자 자료 CRUD(외부 링크, 공개/비공개)
+- Google Sheet/Make에서 전달받은 유료 상태와 현재 유료 구독자 전용 게시판
+- 구독자 게시글·댓글·좋아요와 관리자 숨김/삭제·새 글 이메일 알림
 
 ## 파일 구조
 
@@ -30,6 +32,7 @@ services.py            Quiz·참여·피드백 core
 importers.py           Forms/응답/피드백 변환 계층
 quiz_csv_import.py     관리자 퀴즈 CSV 검증·중복 판정·Import
 resources.py           자료실 구독자 화면과 관리자 CRUD Blueprint
+community.py           유료 구독자 게시판과 관리자 관리 Blueprint
 manage.py              관리·import CLI
 templates/             모바일/관리자 화면
 static/style.css       반응형 UI
@@ -82,6 +85,7 @@ python app.py
 | `MAGIC_LINK_TTL_MINUTES` | 예 | 일회용 링크 만료시간. 기본 `15` |
 | `MAGIC_LINK_REQUEST_COOLDOWN_SECONDS` | 예 | 같은 구독자의 재요청 제한. 기본 `60` |
 | `BREVO_TIMEOUT_SECONDS` | 선택 | Brevo API timeout. 기본 `10` |
+| `COMMUNITY_ADMIN_NOTIFICATION_EMAIL` | 게시판 사용 시 예 | 새 게시글 알림을 받을 관리자 이메일 |
 | `PORT` | 자동 | Railway가 자동 제공 |
 
 `SEED_DEMO_DATA=true`는 동일 데이터를 중복 생성하지 않습니다. 실제 운영 전에는 반드시 `false`로 바꾸십시오.
@@ -98,8 +102,30 @@ python app.py
 - `feedback_questions`, `feedback_options`: 변경 가능한 피드백 문항 정의
 - `feedback_submissions`, `feedback_answers`: 회원 또는 과거 익명 피드백
 - `resources`: 자료 제목·본문·카테고리·외부 링크·공개 상태와 작성/수정 시각
+- `subscribers.is_paid_subscriber`: Google Sheet/Make가 판단한 현재 유료 구독 상태. `is_active`와 별도
+- `community_posts`, `community_comments`, `community_likes`: 게시글·댓글·게시글별 subscriber 1회 좋아요
 
 `resources` 테이블은 앱 시작 시 `CREATE TABLE IF NOT EXISTS`로 추가됩니다. 기존 테이블이나 행을 변경·삭제하지 않는 additive schema 초기화입니다. 관리자는 `/admin/resources`, 로그인한 구독자는 `/resources`를 사용합니다.
+
+게시판 테이블도 같은 additive 초기화 방식으로 추가됩니다. 기존 subscriber에는 `is_paid_subscriber=0`이 적용되며 앱이 실제 유료 여부를 추측하지 않습니다. Google Sheet가 계산한 결과를 Make가 sync API의 `is_paid_subscriber` boolean으로 보내야 합니다. 필드를 보내지 않으면 기존 paid 값은 유지됩니다.
+
+### Make의 유료 상태 전달
+
+`POST /api/subscribers/sync`의 기존 Bearer 인증과 이메일 identity 규칙은 그대로입니다. 기존 payload는 계속 동작하며, Google Sheet에서 판단한 구독 결과를 반영할 때만 아래 boolean 필드를 추가합니다.
+
+```json
+{
+  "email": "member@example.com",
+  "display_name": "구독자 이름",
+  "is_paid_subscriber": true
+}
+```
+
+- 무료 신규 또는 유료 구독 종료: `"is_paid_subscriber": false`
+- 유료 신규 또는 재구독: `"is_paid_subscriber": true`
+- 필드 생략: 기존 subscriber의 유료 상태를 변경하지 않음. 신규 subscriber는 기본 `false`
+
+유료 구독 종료는 `active`를 `false`로 만드는 작업이 아닙니다. `is_active`는 계정 사용 가능 여부로 계속 분리하여 유지합니다.
 
 ## 인증과 Quiz core의 분리
 

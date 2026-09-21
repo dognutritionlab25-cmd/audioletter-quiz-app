@@ -18,6 +18,10 @@ class MagicLinkDeliveryError(RuntimeError):
     pass
 
 
+class CommunityNotificationDeliveryError(RuntimeError):
+    pass
+
+
 def token_digest(raw_token):
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
@@ -97,23 +101,18 @@ def magic_link_on_cooldown(conn, subscriber_id, cooldown_seconds):
         return False
 
 
-def send_magic_link_via_brevo(recipient_email, magic_url, config):
+def _send_brevo_email(recipient_email, subject, html_content, config, error_type, log_name):
     api_key = config.get("BREVO_API_KEY", "")
     sender_email = config.get("MAGIC_LINK_SENDER_EMAIL", "")
     sender_name = config.get("MAGIC_LINK_SENDER_NAME", "")
     if not api_key or not sender_email or not sender_name:
-        raise MagicLinkDeliveryError("Brevo magic-link configuration is incomplete")
+        raise error_type("Brevo transactional email configuration is incomplete")
 
     payload = {
         "sender": {"email": sender_email, "name": sender_name},
         "to": [{"email": recipient_email}],
-        "subject": "오디오레터 이해 테스트 인증 링크",
-        "htmlContent": (
-            "<p>반려견영양연구소 이해 테스트 인증 요청입니다.</p>"
-            f'<p><a href="{html.escape(magic_url, quote=True)}">이 브라우저에서 인증하기</a></p>'
-            "<p>이 링크는 한 번만 사용할 수 있으며 곧 만료됩니다. "
-            "본인이 요청하지 않았다면 이 메일을 무시해주세요.</p>"
-        ),
+        "subject": subject,
+        "htmlContent": html_content,
     }
     request = urllib.request.Request(
         BREVO_ENDPOINT,
@@ -130,10 +129,54 @@ def send_magic_link_via_brevo(recipient_email, magic_url, config):
             request, timeout=int(config.get("BREVO_TIMEOUT_SECONDS", 10))
         ) as response:
             if response.status < 200 or response.status >= 300:
-                raise MagicLinkDeliveryError(f"Brevo returned status {response.status}")
+                raise error_type(f"Brevo returned status {response.status}")
     except urllib.error.HTTPError as exc:
-        LOGGER.error("magic_link_delivery_failed provider=brevo status=%s", exc.code)
-        raise MagicLinkDeliveryError(f"Brevo returned status {exc.code}") from exc
+        LOGGER.error("%s provider=brevo status=%s", log_name, exc.code)
+        raise error_type(f"Brevo returned status {exc.code}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        LOGGER.error("magic_link_delivery_failed provider=brevo error=%s", type(exc).__name__)
-        raise MagicLinkDeliveryError("Brevo request failed") from exc
+        LOGGER.error("%s provider=brevo error=%s", log_name, type(exc).__name__)
+        raise error_type("Brevo request failed") from exc
+
+
+def send_magic_link_via_brevo(recipient_email, magic_url, config):
+    _send_brevo_email(
+        recipient_email,
+        "오디오레터 이해 테스트 인증 링크",
+        (
+            "<p>반려견영양연구소 이해 테스트 인증 요청입니다.</p>"
+            f'<p><a href="{html.escape(magic_url, quote=True)}">이 브라우저에서 인증하기</a></p>'
+            "<p>이 링크는 한 번만 사용할 수 있으며 곧 만료됩니다. "
+            "본인이 요청하지 않았다면 이 메일을 무시해주세요.</p>"
+        ),
+        config,
+        MagicLinkDeliveryError,
+        "magic_link_delivery_failed",
+    )
+
+
+def send_community_post_notification_via_brevo(
+    title, author_name, created_at, admin_url, config
+):
+    recipient_email = config.get("COMMUNITY_ADMIN_NOTIFICATION_EMAIL", "")
+    if not recipient_email:
+        raise CommunityNotificationDeliveryError(
+            "Community notification recipient is not configured"
+        )
+    safe_title = html.escape(title)
+    safe_author = html.escape(author_name)
+    safe_created_at = html.escape(created_at)
+    safe_admin_url = html.escape(admin_url, quote=True)
+    _send_brevo_email(
+        recipient_email,
+        "[반려견영양연구소] 구독자 게시판 새 글",
+        (
+            "<p>구독자 게시판에 새 글이 등록되었습니다.</p>"
+            f"<p><strong>제목</strong>: {safe_title}<br>"
+            f"<strong>작성자</strong>: {safe_author}<br>"
+            f"<strong>작성 시각</strong>: {safe_created_at}</p>"
+            f'<p><a href="{safe_admin_url}">관리자 화면에서 확인하기</a></p>'
+        ),
+        config,
+        CommunityNotificationDeliveryError,
+        "community_notification_delivery_failed",
+    )

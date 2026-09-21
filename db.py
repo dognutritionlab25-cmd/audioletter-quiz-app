@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
     email_hash TEXT UNIQUE,
     is_test INTEGER NOT NULL DEFAULT 0,
     is_active INTEGER NOT NULL DEFAULT 1,
+    is_paid_subscriber INTEGER NOT NULL DEFAULT 0 CHECK(is_paid_subscriber IN (0,1)),
     created_at TEXT NOT NULL
 );
 
@@ -149,6 +150,32 @@ CREATE TABLE IF NOT EXISTS resources (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS community_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscriber_id INTEGER NOT NULL REFERENCES subscribers(id),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    is_visible INTEGER NOT NULL DEFAULT 1 CHECK(is_visible IN (0,1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS community_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id INTEGER NOT NULL REFERENCES community_posts(id) ON DELETE CASCADE,
+    subscriber_id INTEGER NOT NULL REFERENCES subscribers(id),
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS community_likes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id INTEGER NOT NULL REFERENCES community_posts(id) ON DELETE CASCADE,
+    subscriber_id INTEGER NOT NULL REFERENCES subscribers(id),
+    created_at TEXT NOT NULL,
+    UNIQUE(post_id, subscriber_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_questions_episode ON questions(episode_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_attempts_subscriber_episode ON quiz_attempts(subscriber_id, episode_id);
 CREATE INDEX IF NOT EXISTS idx_participation_subscriber ON participation(subscriber_id);
@@ -157,6 +184,12 @@ CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_expiry ON magic_link_tokens(exp
 CREATE INDEX IF NOT EXISTS idx_feedback_episode ON feedback_submissions(episode_id);
 CREATE INDEX IF NOT EXISTS idx_resources_published_created
     ON resources(is_published, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_community_posts_visible_created
+    ON community_posts(is_visible, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_community_comments_post
+    ON community_comments(post_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_community_likes_post
+    ON community_likes(post_id);
 """
 
 
@@ -200,6 +233,12 @@ def init_db(path):
             "subscribers",
             "is_active",
             "INTEGER NOT NULL DEFAULT 1",
+        )
+        _add_column_if_missing(
+            conn,
+            "subscribers",
+            "is_paid_subscriber",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(is_paid_subscriber IN (0,1))",
         )
 
 

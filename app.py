@@ -12,7 +12,14 @@ from flask import (
 )
 from itsdangerous import BadData, URLSafeTimedSerializer
 
-from auth import admin_required, current_subscriber_id, establish_subscriber_session, subscriber_required
+from auth import (
+    admin_required,
+    current_subscriber_id,
+    current_subscriber_is_paid,
+    establish_subscriber_session,
+    subscriber_required,
+)
+from community import community_bp
 from db import connect, init_db, transaction, utcnow
 from magic_links import (
     MagicLinkDeliveryError,
@@ -59,6 +66,9 @@ def create_app(test_config=None):
             os.environ.get("MAGIC_LINK_REQUEST_COOLDOWN_SECONDS", "60")
         ),
         BREVO_TIMEOUT_SECONDS=int(os.environ.get("BREVO_TIMEOUT_SECONDS", "10")),
+        COMMUNITY_ADMIN_NOTIFICATION_EMAIL=os.environ.get(
+            "COMMUNITY_ADMIN_NOTIFICATION_EMAIL", ""
+        ),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true",
@@ -83,8 +93,10 @@ def create_app(test_config=None):
         return session["csrf_token"]
 
     app.jinja_env.globals["csrf_token"] = csrf_token
+    app.jinja_env.globals["current_subscriber_is_paid"] = current_subscriber_is_paid
     app.jinja_env.filters["korean_datetime"] = format_korean_datetime
     app.register_blueprint(resources_bp)
+    app.register_blueprint(community_bp)
 
     @app.before_request
     def verify_csrf():
@@ -147,26 +159,33 @@ def create_app(test_config=None):
         if active_supplied and type(active) is not bool:
             return {"error": "active must be a boolean"}, 400
 
+        paid_supplied = "is_paid_subscriber" in payload
+        paid = payload.get("is_paid_subscriber")
+        if paid_supplied and type(paid) is not bool:
+            return {"error": "is_paid_subscriber must be a boolean"}, 400
+
         digest = email_hash(normalized_email, app.config["MIGRATION_HASH_SECRET"])
         requested_active = int(active) if active_supplied else 1
+        requested_paid = int(paid) if paid_supplied else 0
         generated_public_id = f"sub_{secrets.token_urlsafe(12)}"
         changed = False
 
         with transaction(app.config["DB_PATH"]) as conn:
             inserted = conn.execute(
                 """INSERT OR IGNORE INTO subscribers
-                   (public_id,display_name,email_hash,is_test,is_active,created_at)
-                   VALUES(?,?,?,0,?,?)""",
+                   (public_id,display_name,email_hash,is_test,is_active,is_paid_subscriber,created_at)
+                   VALUES(?,?,?,0,?,?,?)""",
                 (
                     generated_public_id,
                     display_name,
                     digest,
                     requested_active,
+                    requested_paid,
                     utcnow(),
                 ),
             ).rowcount == 1
             subscriber = conn.execute(
-                """SELECT id,public_id,display_name,is_test,is_active
+                """SELECT id,public_id,display_name,is_test,is_active,is_paid_subscriber
                    FROM subscribers WHERE email_hash=?""",
                 (digest,),
             ).fetchone()
@@ -185,6 +204,12 @@ def create_app(test_config=None):
                 if active_supplied and subscriber["is_active"] != int(active):
                     updates.append("is_active=?")
                     parameters.append(int(active))
+                if (
+                    paid_supplied
+                    and subscriber["is_paid_subscriber"] != int(paid)
+                ):
+                    updates.append("is_paid_subscriber=?")
+                    parameters.append(int(paid))
                 if updates:
                     parameters.append(subscriber["id"])
                     conn.execute(
@@ -199,7 +224,7 @@ def create_app(test_config=None):
                         (utcnow(), subscriber["id"]),
                     )
                 subscriber = conn.execute(
-                    """SELECT id,public_id,display_name,is_test,is_active
+                    """SELECT id,public_id,display_name,is_test,is_active,is_paid_subscriber
                        FROM subscribers WHERE id=?""",
                     (subscriber["id"],),
                 ).fetchone()
@@ -210,6 +235,7 @@ def create_app(test_config=None):
             "subscriber": {
                 "public_id": subscriber["public_id"],
                 "active": bool(subscriber["is_active"]),
+                "is_paid_subscriber": bool(subscriber["is_paid_subscriber"]),
             },
         }, 201 if inserted else 200
 
@@ -706,6 +732,7 @@ def create_app(test_config=None):
         conn = db()
         rows = conn.execute(
             """SELECT s.id,s.public_id,s.display_name,s.is_test,s.is_active,
+               s.is_paid_subscriber,
                (SELECT COUNT(*) FROM participation p WHERE p.subscriber_id=s.id) participation_count,
                (SELECT COALESCE(SUM(lp.participation_count),0) FROM legacy_participation lp
                 WHERE lp.subscriber_id=s.id) legacy_count,
