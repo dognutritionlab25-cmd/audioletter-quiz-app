@@ -151,6 +151,27 @@ class QuizAppTest(unittest.TestCase):
             create_default_feedback(conn, episode_id)
         return episode_id, [question_id]
 
+    def create_resource(
+        self,
+        title="공개 자료",
+        category="식단 가이드",
+        body="자료 본문",
+        external_url="https://example.invalid/resource",
+        published=True,
+        created_at=None,
+    ):
+        created_at = created_at or utcnow()
+        with transaction(self.db_path) as conn:
+            return conn.execute(
+                """INSERT INTO resources
+                   (title,body,category,external_url,is_published,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (
+                    title, body, category, external_url,
+                    int(published), created_at, created_at,
+                ),
+            ).lastrowid
+
     def test_01_episode_exists(self):
         conn = connect(self.db_path)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0], 1)
@@ -1463,6 +1484,288 @@ class QuizAppTest(unittest.TestCase):
             ).fetchone()[0],
             0,
         )
+        conn.close()
+
+    def test_67_unauthenticated_resource_list_requires_subscriber_login(self):
+        response = self.client.get("/resources")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/test-identity", response.headers["Location"])
+        self.assertIn("next=", response.headers["Location"])
+
+    def test_68_real_subscriber_sees_published_resources_newest_first(self):
+        older_id = self.create_resource(
+            title="이전 공개 자료",
+            created_at="2026-09-01T00:00:00+00:00",
+        )
+        newer_id = self.create_resource(
+            title="최근 공개 자료",
+            created_at="2026-09-20T00:00:00+00:00",
+        )
+        subscriber_id = self.create_real_subscriber()
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+
+        response = self.client.get("/resources")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("이전 공개 자료", html)
+        self.assertIn("최근 공개 자료", html)
+        self.assertLess(html.index("최근 공개 자료"), html.index("이전 공개 자료"))
+        self.assertIn(f"/resources/{older_id}", html)
+        self.assertIn(f"/resources/{newer_id}", html)
+
+    def test_69_unpublished_resource_is_hidden_from_subscriber_list(self):
+        self.create_resource(title="공개 자료", published=True)
+        self.create_resource(title="관리자 초안", published=False)
+        subscriber_id = self.create_real_subscriber()
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+
+        response = self.client.get("/resources")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("공개 자료", html)
+        self.assertNotIn("관리자 초안", html)
+
+    def test_70_unpublished_resource_direct_url_returns_404(self):
+        resource_id = self.create_resource(title="관리자 초안", published=False)
+        subscriber_id = self.create_real_subscriber()
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+
+        response = self.client.get(f"/resources/{resource_id}")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_71_admin_creates_resource_with_safe_external_link(self):
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "resource-create-csrf"
+
+        response = self.client.post(
+            "/admin/resources/new",
+            data={
+                "csrf_token": "resource-create-csrf",
+                "title": "칼슘 자료",
+                "category": "영양 가이드",
+                "body": "칼슘과 인의 균형을 설명합니다.",
+                "external_url": "https://example.invalid/calcium",
+                "is_published": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        conn = connect(self.db_path)
+        resource = conn.execute(
+            "SELECT * FROM resources WHERE title='칼슘 자료'"
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(resource)
+        self.assertEqual(resource["category"], "영양 가이드")
+        self.assertEqual(resource["external_url"], "https://example.invalid/calcium")
+        self.assertEqual(resource["is_published"], 1)
+
+        subscriber_id = self.create_real_subscriber()
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+        detail = self.client.get(f"/resources/{resource['id']}")
+        html = detail.get_data(as_text=True)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn('rel="noopener noreferrer"', html)
+        self.assertIn('referrerpolicy="no-referrer"', html)
+
+    def test_72_admin_edits_existing_resource(self):
+        resource_id = self.create_resource(title="수정 전", published=False)
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "resource-edit-csrf"
+
+        response = self.client.post(
+            f"/admin/resources/{resource_id}/edit",
+            data={
+                "csrf_token": "resource-edit-csrf",
+                "title": "수정 후",
+                "category": "관찰 가이드",
+                "body": "수정된 본문",
+                "external_url": "",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        conn = connect(self.db_path)
+        resource = conn.execute(
+            "SELECT * FROM resources WHERE id=?", (resource_id,)
+        ).fetchone()
+        conn.close()
+        self.assertEqual(resource["title"], "수정 후")
+        self.assertEqual(resource["category"], "관찰 가이드")
+        self.assertIsNone(resource["external_url"])
+        self.assertEqual(resource["is_published"], 0)
+
+    def test_73_admin_can_publish_and_unpublish_resource(self):
+        resource_id = self.create_resource(published=False)
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "resource-publish-csrf"
+
+        published = self.client.post(
+            f"/admin/resources/{resource_id}/edit",
+            data={
+                "csrf_token": "resource-publish-csrf",
+                "title": "공개 전환 자료",
+                "category": "영양 가이드",
+                "body": "본문",
+                "external_url": "",
+                "is_published": "on",
+            },
+        )
+        unpublished = self.client.post(
+            f"/admin/resources/{resource_id}/edit",
+            data={
+                "csrf_token": "resource-publish-csrf",
+                "title": "비공개 전환 자료",
+                "category": "영양 가이드",
+                "body": "본문",
+                "external_url": "",
+            },
+        )
+
+        self.assertEqual(published.status_code, 302)
+        self.assertEqual(unpublished.status_code, 302)
+        conn = connect(self.db_path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT is_published FROM resources WHERE id=?", (resource_id,)
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+
+    def test_74_admin_deletes_only_selected_resource(self):
+        deleted_id = self.create_resource(title="삭제 대상")
+        kept_id = self.create_resource(title="보존 대상")
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "resource-delete-csrf"
+
+        list_page = self.client.get("/admin/resources")
+        self.assertIn("이 자료를 삭제하시겠습니까?", list_page.get_data(as_text=True))
+        response = self.client.post(
+            f"/admin/resources/{deleted_id}/delete",
+            data={"csrf_token": "resource-delete-csrf"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        conn = connect(self.db_path)
+        self.assertIsNone(
+            conn.execute("SELECT id FROM resources WHERE id=?", (deleted_id,)).fetchone()
+        )
+        self.assertIsNotNone(
+            conn.execute("SELECT id FROM resources WHERE id=?", (kept_id,)).fetchone()
+        )
+        conn.close()
+
+    def test_75_subscriber_cannot_access_admin_resource_crud(self):
+        resource_id = self.create_resource()
+        subscriber_id = self.create_real_subscriber()
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+            state["csrf_token"] = "subscriber-resource-csrf"
+
+        list_response = self.client.get("/admin/resources")
+        new_response = self.client.get("/admin/resources/new")
+        delete_response = self.client.post(
+            f"/admin/resources/{resource_id}/delete",
+            data={"csrf_token": "subscriber-resource-csrf"},
+        )
+
+        self.assertEqual(list_response.status_code, 302)
+        self.assertIn("/admin/login", list_response.headers["Location"])
+        self.assertEqual(new_response.status_code, 302)
+        self.assertIn("/admin/login", new_response.headers["Location"])
+        self.assertEqual(delete_response.status_code, 302)
+        conn = connect(self.db_path)
+        self.assertIsNotNone(
+            conn.execute("SELECT id FROM resources WHERE id=?", (resource_id,)).fetchone()
+        )
+        conn.close()
+
+    def test_76_resource_delete_preserves_quiz_participation_and_feedback(self):
+        subscriber, episode, questions = self.ids()
+        self.finish_attempt(subscriber, episode, questions)
+        conn = connect(self.db_path)
+        feedback_question = conn.execute(
+            """SELECT id FROM feedback_questions
+               WHERE episode_id=? ORDER BY display_order LIMIT 1""",
+            (episode["id"],),
+        ).fetchone()[0]
+        conn.close()
+        save_feedback(
+            self.db_path,
+            episode["id"],
+            subscriber,
+            {feedback_question: ["기존 피드백"]},
+        )
+        resource_id = self.create_resource(title="삭제해도 독립적인 자료")
+
+        conn = connect(self.db_path)
+        protected_tables = (
+            "subscribers", "episodes", "questions", "choices", "quiz_attempts",
+            "attempt_answers", "participation", "feedback_questions",
+            "feedback_options", "feedback_submissions", "feedback_answers",
+        )
+        before = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in protected_tables
+        }
+        conn.close()
+
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "resource-preserve-csrf"
+        response = self.client.post(
+            f"/admin/resources/{resource_id}/delete",
+            data={"csrf_token": "resource-preserve-csrf"},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = connect(self.db_path)
+        after = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in protected_tables
+        }
+        conn.close()
+        self.assertEqual(after, before)
+
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber
+        self.assertEqual(self.client.get("/quiz?episode=R041").status_code, 200)
+        self.assertEqual(self.client.get("/me").status_code, 200)
+
+    def test_77_resource_external_url_rejects_non_http_scheme(self):
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "resource-url-csrf"
+
+        response = self.client.post(
+            "/admin/resources/new",
+            data={
+                "csrf_token": "resource-url-csrf",
+                "title": "위험 링크",
+                "category": "자료",
+                "body": "본문",
+                "external_url": "javascript:alert(1)",
+                "is_published": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("올바른 http 또는 https", response.get_data(as_text=True))
+        conn = connect(self.db_path)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM resources").fetchone()[0], 0)
         conn.close()
 
 
