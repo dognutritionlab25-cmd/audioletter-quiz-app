@@ -20,6 +20,8 @@
     <button class="primary">상태 저장</button>
   </form>
   <p><small>비활성화하면 새 Magic Link 발급과 기존 로그인 세션의 Quiz 접근이 차단됩니다.</small></p>
+  <p><strong>유료 구독 상태</strong><br>{{ '현재 유료 구독자' if person.is_paid_subscriber else '무료 구독자 또는 구독 종료' }}</p>
+  <p><small>유료 상태는 Google Sheet에서 판단한 결과를 Make sync API로 반영합니다. 이 화면에서는 변경하지 않습니다.</small></p>
 </section>
 <h2>시즌1 과거 참여 기록</h2>
 <section class="card">

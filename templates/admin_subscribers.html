@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 <div class="admin-head"><h1>구독자별 참여 현황</h1><a class="primary button-link" href="{{ url_for('admin_subscriber_new') }}">새 구독자 등록</a></div>
-<div class="table-wrap"><table><thead><tr><th>내부 ID</th><th>표시 이름</th><th>상태</th><th>앱 참여</th><th>과거 참여</th><th>누적</th><th>최근 참여 (한국시간)</th></tr></thead><tbody>
-{% for r in rows %}<tr><td><a href="{{ url_for('admin_subscriber_detail', subscriber_id=r.id) }}">{{ r.public_id }}</a></td><td>{{ r.display_name or '-' }}{% if r.is_test %} (테스트){% endif %}</td><td>{{ '활성' if r.is_active else '비활성' }}</td><td>{{ r.participation_count }}</td><td>{{ r.legacy_count }}</td><td>{{ r.participation_count + r.legacy_count }}</td><td>{{ r.last_participation|korean_datetime }}</td></tr>{% endfor %}
+<div class="table-wrap"><table><thead><tr><th>내부 ID</th><th>표시 이름</th><th>계정</th><th>유료</th><th>앱 참여</th><th>과거 참여</th><th>누적</th><th>최근 참여 (한국시간)</th></tr></thead><tbody>
+{% for r in rows %}<tr><td><a href="{{ url_for('admin_subscriber_detail', subscriber_id=r.id) }}">{{ r.public_id }}</a></td><td>{{ r.display_name or '-' }}{% if r.is_test %} (테스트){% endif %}</td><td>{{ '활성' if r.is_active else '비활성' }}</td><td>{{ '유료' if r.is_paid_subscriber else '무료/종료' }}</td><td>{{ r.participation_count }}</td><td>{{ r.legacy_count }}</td><td>{{ r.participation_count + r.legacy_count }}</td><td>{{ r.last_participation|korean_datetime }}</td></tr>{% endfor %}
 </tbody></table></div>
 {% endblock %}
