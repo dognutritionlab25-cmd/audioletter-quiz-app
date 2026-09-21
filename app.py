@@ -36,6 +36,7 @@ from services import (
 
 
 BASE_DIR = Path(__file__).resolve().parent
+SEASON_ONE_EPISODE_CODES = tuple(f"R{number:03d}" for number in range(1, 43))
 
 
 def create_app(test_config=None):
@@ -505,6 +506,41 @@ def create_app(test_config=None):
         ).fetchall()
         conn.close()
         return render_template("admin_dashboard.html", totals=totals, episodes=episodes)
+
+    @app.post("/admin/episodes/publish-season-1")
+    @admin_required
+    def admin_publish_season_one():
+        placeholders = ",".join("?" for _ in SEASON_ONE_EPISODE_CODES)
+        with transaction(app.config["DB_PATH"]) as conn:
+            existing_codes = {
+                row["code"]
+                for row in conn.execute(
+                    f"SELECT code FROM episodes WHERE code IN ({placeholders})",
+                    SEASON_ONE_EPISODE_CODES,
+                )
+            }
+            missing_codes = [
+                code for code in SEASON_ONE_EPISODE_CODES if code not in existing_codes
+            ]
+            if missing_codes:
+                flash(
+                    "공개 상태를 변경하지 않았습니다. 누락 회차: "
+                    + ", ".join(missing_codes),
+                    "error",
+                )
+                return redirect(url_for("admin_dashboard"))
+
+            changed = conn.execute(
+                f"""UPDATE episodes SET is_published=1
+                    WHERE code IN ({placeholders}) AND is_published<>1""",
+                SEASON_ONE_EPISODE_CODES,
+            ).rowcount
+
+        flash(
+            f"Season 1 R001~R042 공개 완료: {changed}개 회차의 상태를 변경했습니다.",
+            "success",
+        )
+        return redirect(url_for("admin_dashboard"))
 
     @app.route("/admin/seasons", methods=["GET", "POST"])
     @admin_required
