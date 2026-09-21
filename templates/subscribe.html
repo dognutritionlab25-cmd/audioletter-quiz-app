@@ -1,0 +1,89 @@
+{% extends 'base.html' %}
+{% block title %}구독 안내 · 반려견영양연구소{% endblock %}
+{% block content %}
+<section class="hero public-hero">
+  <p class="eyebrow">AUDIO LETTER</p>
+  <h1>반려견 영양 오디오레터</h1>
+  <p>반려견의 식단만이 아니라<br>먹는 것과 몸이 어떻게 연결되는지 함께 공부하는<br>보호자 대상 오디오 콘텐츠입니다.</p>
+</section>
+
+<section class="card public-section">
+  <h2>Season 1 안내</h2>
+  <p>시즌1은 총 42회차이며 <strong>1~6회차는 무료</strong>, <strong>7회차부터 유료</strong>로 이어집니다.</p>
+  <p>매주 금요일 오후 2시, 주 2편씩 순차적으로 제공됩니다.</p>
+</section>
+
+<section class="public-section">
+  <h2>구독 플랜</h2>
+  <div class="plan-grid">
+    {% for code, plan in plans.items() %}
+    <article class="card plan-card">
+      <h3>{{ plan.name }}</h3>
+      <p class="plan-price">{{ plan.price }}</p>
+      <p>{{ plan.episodes }}</p>
+    </article>
+    {% endfor %}
+  </div>
+  <div class="notice"><strong>본 서비스는 자동결제가 아닙니다.</strong><br>이용권 종료 후 계속 이용하고 싶은 경우에만 직접 재결제하며, 재구독하지 않으면 추가 결제가 발생하지 않습니다.</div>
+</section>
+
+<section class="card public-section">
+  <h2>구독자 전용 서비스</h2>
+  <ul>
+    <li>오디오레터 관련 학습 자료</li>
+    <li>이해 테스트</li>
+    <li>나의 참여 기록</li>
+    <li>구독자 자료실</li>
+    <li>유료 구독자 게시판</li>
+  </ul>
+</section>
+
+<section class="card public-section">
+  <h2>결제 전 핵심 안내</h2>
+  <ul>
+    <li>디지털 콘텐츠 구독 상품입니다.</li>
+    <li>1개월권은 4회차, 3개월권은 12회차가 제공됩니다.</li>
+    <li>매주 금요일 순차 제공되며 자동결제가 아닙니다.</li>
+    <li>결제 후 안내되는 구독 신청 정보를 입력해야 정상 등록됩니다.</li>
+    <li>콘텐츠 제공 전에는 전액 환불할 수 있습니다.</li>
+    <li>콘텐츠 제공 시작 후 중도해지는 이용약관의 환불 기준이 적용됩니다.</li>
+    <li>상세 청약철회·환불 기준은 <a href="{{ url_for('public_pages.terms') }}">이용약관</a>에서 확인해주세요.</li>
+  </ul>
+</section>
+
+{% if payment_available %}
+<section class="card public-section" id="payment">
+  <h2>필수 확인 후 결제</h2>
+  {% if admin_preview %}<p class="notice"><strong>관리자 미리보기</strong><br>현재 일반 방문자에게는 결제 페이지가 비공개입니다.</p>{% endif %}
+  <form id="payment-form" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label class="agreement"><input type="checkbox" name="agree_terms" value="yes" required> <span><a href="{{ url_for('public_pages.terms') }}" target="_blank" rel="noopener">이용약관</a>을 읽고 동의합니다. (필수)</span></label>
+    <label class="agreement"><input type="checkbox" name="agree_privacy" value="yes" required> <span><a href="{{ url_for('public_pages.privacy') }}" target="_blank" rel="noopener">개인정보 수집·이용 및 개인정보처리방침</a>을 확인하고 동의합니다. (필수)</span></label>
+    <div class="plan-grid payment-actions">
+      {% for code, plan in plans.items() %}
+      <button class="primary payment-button" type="submit" formaction="{{ url_for('public_pages.start_payment', plan_code=code) }}" disabled>{{ plan.name }} 결제하기</button>
+      {% endfor %}
+    </div>
+  </form>
+</section>
+<script>
+(() => {
+  const form = document.getElementById('payment-form');
+  const checks = Array.from(form.querySelectorAll('input[type="checkbox"]'));
+  const buttons = Array.from(form.querySelectorAll('.payment-button'));
+  const update = () => {
+    const agreed = checks.every((checkbox) => checkbox.checked);
+    buttons.forEach((button) => { button.disabled = !agreed; });
+  };
+  checks.forEach((checkbox) => checkbox.addEventListener('change', update));
+  update();
+})();
+</script>
+{% else %}
+<section class="card public-section center">
+  <h2>구독 결제 준비 중</h2>
+  <p>현재 구독 결제 페이지를 준비 중입니다.</p>
+  <p><small>공개 준비가 완료되면 이 페이지에서 결제를 안내합니다.</small></p>
+</section>
+{% endif %}
+{% endblock %}

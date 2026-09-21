@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block title %}Portal 공개 설정 · 관리자{% endblock %}
+{% block content %}
+<div class="admin-head"><div><p class="eyebrow">ADMIN</p><h1>Portal 공개 설정</h1></div><a class="secondary button-link" href="{{ url_for('admin_dashboard') }}">관리자 홈</a></div>
+<form class="card stack" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label class="agreement"><input type="checkbox" name="subscription_page_enabled" value="1" {% if settings.subscription_page_enabled %}checked{% endif %}> <span><strong>구독 결제 페이지 공개</strong><br><small>끄면 일반 방문자는 결제할 수 없고, 로그인한 관리자만 미리보기와 결제 이동을 테스트할 수 있습니다.</small></span></label>
+  <label>이용약관 시행일<input type="date" name="terms_effective_date" value="{{ settings.terms_effective_date or '' }}"></label>
+  <label>개인정보처리방침 시행일<input type="date" name="privacy_effective_date" value="{{ settings.privacy_effective_date or '' }}"></label>
+  <button class="primary" type="submit">설정 저장</button>
+</form>
+<p class="center"><a href="{{ url_for('public_pages.subscribe') }}">구독 안내 미리보기</a> · <a href="{{ url_for('public_pages.terms') }}">이용약관 보기</a> · <a href="{{ url_for('public_pages.privacy') }}">개인정보처리방침 보기</a></p>
+{% endblock %}
