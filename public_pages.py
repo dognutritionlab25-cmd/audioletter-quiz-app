@@ -11,17 +11,17 @@ public_pages_bp = Blueprint("public_pages", __name__)
 # Keep external checkout destinations in one server-side location. Templates
 # receive only internal payment routes, never the PayApp destinations.
 PAYMENT_PLANS = {
-    "one-month": {
-        "name": "1개월 이용권",
-        "price": "9,900원",
-        "episodes": "4회차 제공",
-        "url": "https://www.payapp.kr/L/z49rzA",
-    },
     "three-month": {
         "name": "3개월 이용권",
         "price": "25,000원",
         "episodes": "12회차 제공",
         "url": "https://www.payapp.kr/L/z49suD",
+    },
+    "one-month": {
+        "name": "1개월 이용권",
+        "price": "9,900원",
+        "episodes": "4회차 제공",
+        "url": "https://www.payapp.kr/L/z49rzA",
     },
 }
 
