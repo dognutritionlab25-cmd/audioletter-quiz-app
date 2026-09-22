@@ -549,8 +549,14 @@ def create_app(test_config=None):
     @admin_required
     def admin_dashboard():
         conn = db()
+        subscriber_totals = conn.execute(
+            """SELECT COUNT(*) total,
+                      COALESCE(SUM(CASE WHEN is_paid_subscriber=1 THEN 1 ELSE 0 END),0) paid,
+                      COALESCE(SUM(CASE WHEN is_paid_subscriber=0 THEN 1 ELSE 0 END),0) not_paid,
+                      COALESCE(SUM(CASE WHEN is_active=0 THEN 1 ELSE 0 END),0) inactive
+               FROM subscribers"""
+        ).fetchone()
         totals = {
-            "subscribers": conn.execute("SELECT COUNT(*) FROM subscribers").fetchone()[0],
             "episodes": conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0],
             "participation": conn.execute("SELECT COUNT(*) FROM participation").fetchone()[0],
             "feedback": conn.execute("SELECT COUNT(*) FROM feedback_submissions").fetchone()[0],
@@ -563,7 +569,12 @@ def create_app(test_config=None):
                FROM episodes e JOIN seasons s ON s.id=e.season_id ORDER BY e.display_order,e.code"""
         ).fetchall()
         conn.close()
-        return render_template("admin_dashboard.html", totals=totals, episodes=episodes)
+        return render_template(
+            "admin_dashboard.html",
+            totals=totals,
+            subscriber_totals=subscriber_totals,
+            episodes=episodes,
+        )
 
     @app.post("/admin/episodes/publish-season-1")
     @admin_required
@@ -760,6 +771,13 @@ def create_app(test_config=None):
     @admin_required
     def admin_subscribers():
         conn = db()
+        totals = conn.execute(
+            """SELECT COUNT(*) total,
+                      COALESCE(SUM(CASE WHEN is_paid_subscriber=1 THEN 1 ELSE 0 END),0) paid,
+                      COALESCE(SUM(CASE WHEN is_paid_subscriber=0 THEN 1 ELSE 0 END),0) not_paid,
+                      COALESCE(SUM(CASE WHEN is_active=0 THEN 1 ELSE 0 END),0) inactive
+               FROM subscribers"""
+        ).fetchone()
         rows = conn.execute(
             """SELECT s.id,s.public_id,s.display_name,s.is_test,s.is_active,
                s.is_paid_subscriber,
@@ -772,7 +790,7 @@ def create_app(test_config=None):
                (participation_count + legacy_count) DESC,s.id"""
         ).fetchall()
         conn.close()
-        return render_template("admin_subscribers.html", rows=rows)
+        return render_template("admin_subscribers.html", rows=rows, totals=totals)
 
     @app.route("/admin/subscribers/new", methods=["GET", "POST"])
     @admin_required

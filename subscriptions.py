@@ -294,15 +294,22 @@ def registration_complete():
 @subscriptions_bp.get("/admin/subscription-registrations")
 @admin_required
 def admin_registration_list():
+    status_filter = request.args.get("status", "all")
+    if status_filter not in {"all", "pending", "completed"}:
+        status_filter = "all"
     conn = connect(current_app.config["DB_PATH"])
+    where_clause = "" if status_filter == "all" else "WHERE r.status=?"
+    parameters = () if status_filter == "all" else (status_filter,)
     rows = conn.execute(
-        """SELECT r.public_id,r.plan_code,r.registration_type,r.status,
+        f"""SELECT r.public_id,r.plan_code,r.registration_type,r.status,
                   r.created_at,r.completed_at,p.encrypted_payload,
                   d.name dog_name,d.birth_date dog_birth_date,d.breed dog_breed
            FROM subscription_registrations r
            LEFT JOIN subscription_registration_payloads p ON p.registration_id=r.id
            LEFT JOIN dog_profiles d ON d.registration_id=r.id
-           ORDER BY r.created_at DESC,r.id DESC"""
+           {where_clause}
+           ORDER BY r.created_at DESC,r.id DESC""",
+        parameters,
     ).fetchall()
     conn.close()
 
@@ -365,7 +372,9 @@ def admin_registration_list():
         )
 
     return render_template(
-        "admin_subscription_registrations.html", registrations=registrations
+        "admin_subscription_registrations.html",
+        registrations=registrations,
+        status_filter=status_filter,
     )
 
 
