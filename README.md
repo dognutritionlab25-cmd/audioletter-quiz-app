@@ -136,6 +136,8 @@ python app.py
 
 Make 전달에 필요한 이메일·보호자 이름·연락처·결제자 이름·관심 내용은 `subscription_registrations`에 원문으로 저장하지 않습니다. 별도 `subscription_registration_payloads`에 authenticated encryption(Fernet)으로 임시 보관하고, pending API에서만 서버가 복호화합니다. Make의 현재 JSON field mapping은 그대로 유지됩니다. `/complete`가 성공하면 encrypted payload는 즉시 삭제되며 신청 메타데이터, 이메일 HMAC과 subscriber에 연결된 `dog_profiles`는 유지됩니다.
 
+관리자는 `/admin/subscription-registrations`에서 신청 목록을 읽기 전용으로 확인할 수 있습니다. pending 신청은 해당 신청의 encrypted payload를 서버에서 복호화해 제출 원문을 표시합니다. completed 신청은 최소보관 정책에 따라 원문 payload가 이미 삭제되므로 신청 메타데이터·처리상태·반려견 프로필만 표시하고, 이메일·연락처 등을 subscriber나 외부 시스템에서 재구성하지 않습니다.
+
 전용 키는 아래처럼 한 번 생성하여 Railway secret variable로 설정합니다. 기존 `APP_SECRET`, `MIGRATION_HASH_SECRET` 또는 API key를 재사용하면 안 됩니다.
 
 ```bash
