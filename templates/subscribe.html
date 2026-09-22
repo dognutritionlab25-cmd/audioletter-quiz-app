@@ -3,8 +3,13 @@
 {% block content %}
 <section class="hero public-hero">
   <p class="eyebrow">AUDIO LETTER</p>
-  <h1>반려견 영양 오디오레터</h1>
-  <p>반려견의 식단만이 아니라<br>먹는 것과 몸이 어떻게 연결되는지 함께 공부하는<br>보호자 대상 오디오 콘텐츠입니다.</p>
+  <h1>반려견 오디오레터</h1>
+  <p>반려견의 몸을 이해하면, 먹는 것도 다르게 보입니다.<br>영양을 중심으로 생리와 질환, 생활환경까지 연결해<br>반려견을 더 깊이 이해하는 오디오 콘텐츠입니다.</p>
+</section>
+
+<section class="card public-section">
+  <h2>구독 시작은 이렇게 진행됩니다.</h2>
+  <p>결제 후 반려견 정보를 간단히 입력하면 구독 등록이 완료됩니다.<br>등록이 완료되면 카카오 알림톡으로 안내해 드리며,<br>매주 금요일 새로운 오디오레터를 보내드립니다.</p>
 </section>
 
 <section class="card public-section">
@@ -44,7 +49,7 @@
     <li>디지털 콘텐츠 구독 상품입니다.</li>
     <li>1개월권은 4회차, 3개월권은 12회차가 제공됩니다.</li>
     <li>매주 금요일 순차 제공되며 자동결제가 아닙니다.</li>
-    <li>결제 후 안내되는 구독 신청 정보를 입력해야 정상 등록됩니다.</li>
+    <li>결제 후 이 페이지의 구독 등록 화면에서 반려견 정보를 입력해야 정상 등록됩니다.</li>
     <li>콘텐츠 제공 전에는 전액 환불할 수 있습니다.</li>
     <li>콘텐츠 제공 시작 후 중도해지는 이용약관의 환불 기준이 적용됩니다.</li>
     <li>상세 청약철회·환불 기준은 <a href="{{ url_for('public_pages.terms') }}">이용약관</a>에서 확인해주세요.</li>
@@ -79,6 +84,12 @@
   update();
 })();
 </script>
+<section class="card public-section registration-cta">
+  <p class="eyebrow">PAYMENT COMPLETE?</p>
+  <h2>결제를 완료하셨나요?</h2>
+  <p>PayApp 결제를 마친 뒤 반려견 정보를 입력해주세요. 실제 결제내역 확인 후 구독 등록이 완료됩니다.</p>
+  <a class="primary button-link" href="{{ url_for('subscriptions.register') }}">구독 등록하기</a>
+</section>
 {% else %}
 <section class="card public-section center">
   <h2>구독 결제 준비 중</h2>

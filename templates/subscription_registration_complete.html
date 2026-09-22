@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block title %}구독 등록 신청 완료 · 반려견영양연구소{% endblock %}
+{% block content %}
+<section class="card narrow center">
+  <div class="complete-mark">✓</div>
+  <h1>구독 등록 신청을 받았습니다.</h1>
+  <p>실제 결제내역 확인 후 구독 등록이 완료됩니다.</p>
+  <p>등록이 완료되면 카카오 알림톡으로 안내해 드립니다.</p>
+  <a class="secondary button-link" href="{{ url_for('public_pages.subscribe') }}">구독 안내로 돌아가기</a>
+</section>
+{% endblock %}
