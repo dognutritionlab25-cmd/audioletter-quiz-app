@@ -40,6 +40,10 @@ class QuizAppTest(unittest.TestCase):
             "SEED_DEMO_DATA": False,
             "MIGRATION_HASH_SECRET": "migration-test-secret",
             "SUBSCRIBER_SYNC_API_KEY": "sync-test-secret",
+            "SUBSCRIPTION_REGISTRATION_API_KEY": "registration-test-secret",
+            "SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY": (
+                "BVNXRQRh_hvpCeOkdlibHHdypT6aujBxlG5Oj_Rd7Ok="
+            ),
             "COMMUNITY_NOTIFICATION_SENDER": (
                 lambda *args: self.community_notifications.append(args)
             ),
@@ -97,6 +101,29 @@ class QuizAppTest(unittest.TestCase):
         with client.session_transaction() as state:
             state["csrf_token"] = value
         return value
+
+    def registration_form_data(self, **overrides):
+        data = {
+            "csrf_token": "registration-csrf",
+            "plan_code": "three-month",
+            "guardian_name": "보호자",
+            "dog_name": "토리",
+            "email": "member@example.invalid",
+            "contact_phone": "010-1234-5678",
+            "dog_birth_date": "2020-05-12",
+            "dog_breed": "믹스견",
+            "payer_name": "",
+            "interests": "영양과 장 건강",
+            "registration_type": "new",
+            "privacy_agree": "yes",
+        }
+        data.update(overrides)
+        return data
+
+    def enable_subscription_registration(self):
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE portal_settings SET subscription_page_enabled=1 WHERE id=1")
+        self.set_csrf(self.client, "registration-csrf")
 
     @staticmethod
     def quiz_csv(code, episode_number, question_count, choice_count=4, explanation=True):
@@ -2287,7 +2314,7 @@ class QuizAppTest(unittest.TestCase):
 
     def test_98_public_subscription_terms_and_privacy_need_no_login(self):
         for path, text in [
-            ("/subscribe", "반려견 영양 오디오레터"),
+            ("/subscribe", "반려견 오디오레터"),
             ("/terms", "서비스 이용약관"),
             ("/privacy", "개인정보처리방침"),
         ]:
@@ -2479,6 +2506,469 @@ class QuizAppTest(unittest.TestCase):
             0,
         )
         conn.close()
+
+    def test_112_subscription_copy_plan_order_and_registration_cta(self):
+        self.enable_subscription_registration()
+        html = self.client.get("/subscribe").get_data(as_text=True)
+        self.assertIn("영양을 중심으로 생리와 질환, 생활환경까지 연결해", html)
+        self.assertNotIn("Google Form", html)
+        self.assertLess(html.index("3개월 이용권"), html.index("1개월 이용권"))
+        self.assertIn("결제를 완료하셨나요?", html)
+        self.assertIn('/subscription/register', html)
+
+    def test_113_registration_page_respects_subscription_page_off_and_admin_preview(self):
+        self.assertEqual(self.client.get("/subscription/register").status_code, 403)
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+        response = self.client.get("/subscription/register")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("구독 등록", response.get_data(as_text=True))
+
+    def test_114_valid_registration_saves_application_and_dog_without_paid_access(self):
+        self.enable_subscription_registration()
+        response = self.client.post(
+            "/subscription/register", data=self.registration_form_data()
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(urlsplit(response.headers["Location"]).path, "/subscription/register/complete")
+        conn = connect(self.db_path)
+        registration = conn.execute("SELECT * FROM subscription_registrations").fetchone()
+        dog = conn.execute("SELECT * FROM dog_profiles").fetchone()
+        subscriber = conn.execute(
+            "SELECT * FROM subscribers WHERE email_hash=?",
+            (email_hash("member@example.invalid", "migration-test-secret"),),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(registration["status"], "pending")
+        self.assertEqual(dog["name"], "토리")
+        self.assertEqual(dog["birth_date"], "2020-05-12")
+        self.assertIsNone(registration["subscriber_id"])
+        self.assertIsNone(subscriber)
+
+    def test_115_registration_rejects_invalid_input_without_writing(self):
+        self.enable_subscription_registration()
+        response = self.client.post(
+            "/subscription/register",
+            data=self.registration_form_data(
+                email="not-email",
+                contact_phone="123",
+                dog_birth_date="2999-01-01",
+                privacy_agree="",
+            ),
+        )
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("이메일 주소를 올바르게", html)
+        self.assertIn("개인정보 수집·이용에 동의", html)
+        conn = connect(self.db_path)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM subscription_registrations").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM dog_profiles").fetchone()[0], 0)
+        conn.close()
+
+    def test_116_registration_post_requires_csrf(self):
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE portal_settings SET subscription_page_enabled=1 WHERE id=1")
+        data = self.registration_form_data()
+        data.pop("csrf_token")
+        self.assertEqual(self.client.post("/subscription/register", data=data).status_code, 400)
+
+    def test_117_duplicate_pending_registration_updates_in_place(self):
+        self.enable_subscription_registration()
+        self.client.post("/subscription/register", data=self.registration_form_data())
+        self.client.post(
+            "/subscription/register",
+            data=self.registration_form_data(
+                email="  MEMBER@EXAMPLE.INVALID ", dog_name="토리 수정", dog_breed="말티즈"
+            ),
+        )
+        conn = connect(self.db_path)
+        registration_count = conn.execute("SELECT COUNT(*) FROM subscription_registrations").fetchone()[0]
+        dog_rows = conn.execute("SELECT name,breed FROM dog_profiles").fetchall()
+        conn.close()
+        self.assertEqual(registration_count, 1)
+        self.assertEqual(len(dog_rows), 1)
+        self.assertEqual((dog_rows[0]["name"], dog_rows[0]["breed"]), ("토리 수정", "말티즈"))
+
+    def test_118_unrelated_logged_in_subscriber_cannot_claim_dog_profile(self):
+        self.enable_subscription_registration()
+        unrelated_id = self.create_real_subscriber(
+            "other@example.invalid", "다른 구독자"
+        )
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = unrelated_id
+            state["csrf_token"] = "registration-csrf"
+        self.client.post("/subscription/register", data=self.registration_form_data())
+        conn = connect(self.db_path)
+        registration = conn.execute("SELECT subscriber_id FROM subscription_registrations").fetchone()
+        dog = conn.execute("SELECT id,subscriber_id FROM dog_profiles").fetchone()
+        conn.close()
+        self.assertIsNone(registration["subscriber_id"])
+        self.assertIsNone(dog["subscriber_id"])
+        self.assertEqual(self.client.get(f"/subscription/dogs/{dog['id']}").status_code, 404)
+
+    def test_119_pending_registration_api_requires_separate_bearer_key(self):
+        self.enable_subscription_registration()
+        self.client.post("/subscription/register", data=self.registration_form_data())
+        for headers in ({}, {"Authorization": "Bearer wrong"}):
+            with self.subTest(headers=headers):
+                self.assertEqual(
+                    self.client.get("/api/subscription-registrations/pending", headers=headers).status_code,
+                    401,
+                )
+
+    def test_120_pending_registration_api_returns_form_mapping_and_no_store(self):
+        self.enable_subscription_registration()
+        self.client.post("/subscription/register", data=self.registration_form_data())
+        response = self.client.get(
+            "/api/subscription-registrations/pending",
+            headers={"Authorization": "Bearer registration-test-secret"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        item = response.get_json()["registrations"][0]
+        self.assertEqual(item["subscription_period"], "3개월")
+        self.assertEqual(item["email"], "member@example.invalid")
+        self.assertEqual(item["contact_phone"], "01012345678")
+        self.assertEqual(item["dog_birth_date"], "2020.05.12")
+        self.assertEqual(item["registration_type"], "신규")
+        self.assertTrue(item["privacy_agreed"])
+
+    def test_121_subscriber_sync_links_profile_but_does_not_infer_paid_status(self):
+        self.enable_subscription_registration()
+        self.client.post("/subscription/register", data=self.registration_form_data())
+        response = self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": "member@example.invalid", "display_name": "보호자"},
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(response.get_json()["subscriber"]["is_paid_subscriber"])
+        conn = connect(self.db_path)
+        registration = conn.execute("SELECT subscriber_id,status FROM subscription_registrations").fetchone()
+        dog = conn.execute("SELECT subscriber_id FROM dog_profiles").fetchone()
+        person = conn.execute("SELECT is_paid_subscriber FROM subscribers WHERE id=?", (registration["subscriber_id"],)).fetchone()
+        conn.close()
+        self.assertIsNotNone(registration["subscriber_id"])
+        self.assertEqual(dog["subscriber_id"], registration["subscriber_id"])
+        self.assertEqual(person["is_paid_subscriber"], 0)
+        self.assertEqual(registration["status"], "pending")
+
+    def test_122_make_completion_requires_sync_and_is_idempotent(self):
+        self.enable_subscription_registration()
+        self.client.post("/subscription/register", data=self.registration_form_data())
+        conn = connect(self.db_path)
+        public_id = conn.execute("SELECT public_id FROM subscription_registrations").fetchone()[0]
+        conn.close()
+        headers = {"Authorization": "Bearer registration-test-secret"}
+        self.assertEqual(
+            self.client.post(f"/api/subscription-registrations/{public_id}/complete", headers=headers).status_code,
+            409,
+        )
+        conn = connect(self.db_path)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM subscription_registration_payloads").fetchone()[0],
+            1,
+        )
+        conn.close()
+        self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": "member@example.invalid", "is_paid_subscriber": True},
+        )
+        first = self.client.post(f"/api/subscription-registrations/{public_id}/complete", headers=headers)
+        second = self.client.post(f"/api/subscription-registrations/{public_id}/complete", headers=headers)
+        self.assertEqual(first.get_json()["status"], "completed")
+        self.assertEqual(second.get_json()["status"], "unchanged")
+        conn = connect(self.db_path)
+        row = conn.execute(
+            """SELECT r.status,s.is_paid_subscriber FROM subscription_registrations r
+               JOIN subscribers s ON s.id=r.subscriber_id"""
+        ).fetchone()
+        payload_count = conn.execute(
+            "SELECT COUNT(*) FROM subscription_registration_payloads"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["is_paid_subscriber"], 1)
+        self.assertEqual(payload_count, 0)
+
+    def test_123_completed_registration_allows_future_resubscription(self):
+        self.enable_subscription_registration()
+        self.client.post("/subscription/register", data=self.registration_form_data())
+        self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": "member@example.invalid", "is_paid_subscriber": True},
+        )
+        conn = connect(self.db_path)
+        public_id = conn.execute("SELECT public_id FROM subscription_registrations").fetchone()[0]
+        conn.close()
+        headers = {"Authorization": "Bearer registration-test-secret"}
+        self.client.post(f"/api/subscription-registrations/{public_id}/complete", headers=headers)
+        self.client.post(
+            "/subscription/register",
+            data=self.registration_form_data(registration_type="renewal", plan_code="one-month"),
+        )
+        conn = connect(self.db_path)
+        statuses = conn.execute(
+            "SELECT status,registration_type,plan_code FROM subscription_registrations ORDER BY id"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(statuses), 2)
+        self.assertEqual(statuses[0]["status"], "completed")
+        self.assertEqual((statuses[1]["status"], statuses[1]["registration_type"], statuses[1]["plan_code"]), ("pending", "renewal", "one-month"))
+
+    def test_124_additive_registration_migration_preserves_existing_rows(self):
+        before = connect(self.db_path)
+        counts_before = {
+            table: before.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("subscribers", "episodes", "questions", "participation", "feedback_submissions")
+        }
+        before.close()
+        migrated = create_app({
+            "TESTING": True,
+            "SECRET_KEY": "migration-secret",
+            "DB_PATH": self.db_path,
+            "ENABLE_TEST_IDENTITY": True,
+            "SEED_DEMO_DATA": False,
+            "MIGRATION_HASH_SECRET": "migration-test-secret",
+        })
+        self.assertIsNotNone(migrated)
+        after = connect(self.db_path)
+        counts_after = {
+            table: after.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in counts_before
+        }
+        table_names = {
+            row[0] for row in after.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        after.close()
+        self.assertEqual(counts_before, counts_after)
+        self.assertIn("subscription_registrations", table_names)
+        self.assertIn("subscription_registration_payloads", table_names)
+        self.assertIn("dog_profiles", table_names)
+
+    def test_125_registration_pii_is_only_stored_as_encrypted_payload(self):
+        self.enable_subscription_registration()
+        values = self.registration_form_data(
+            email="private-person@example.invalid",
+            guardian_name="SensitiveGuardian",
+            contact_phone="010-8765-4321",
+            payer_name="SensitivePayer",
+            interests="SensitiveInterests",
+        )
+        self.client.post("/subscription/register", data=values)
+        conn = connect(self.db_path)
+        registration_columns = {
+            row["name"] for row in conn.execute(
+                "PRAGMA table_info(subscription_registrations)"
+            )
+        }
+        token = conn.execute(
+            "SELECT encrypted_payload FROM subscription_registration_payloads"
+        ).fetchone()[0]
+        conn.close()
+        self.assertTrue(
+            {"email", "guardian_name", "contact_phone", "payer_name", "interests"}.isdisjoint(
+                registration_columns
+            )
+        )
+        for plaintext in (
+            "private-person@example.invalid",
+            "SensitiveGuardian",
+            "01087654321",
+            "SensitivePayer",
+            "SensitiveInterests",
+        ):
+            self.assertNotIn(plaintext, token)
+            self.assertNotIn(plaintext.encode("utf-8"), Path(self.db_path).read_bytes())
+
+    def test_126_pending_api_preserves_existing_plaintext_response_contract(self):
+        self.enable_subscription_registration()
+        self.client.post(
+            "/subscription/register",
+            data=self.registration_form_data(payer_name="결제자", interests="장 건강"),
+        )
+        response = self.client.get(
+            "/api/subscription-registrations/pending",
+            headers={"Authorization": "Bearer registration-test-secret"},
+        )
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["registrations"][0]
+        self.assertEqual(item["email"], "member@example.invalid")
+        self.assertEqual(item["guardian_name"], "보호자")
+        self.assertEqual(item["contact_phone"], "01012345678")
+        self.assertEqual(item["payer_name"], "결제자")
+        self.assertEqual(item["interests"], "장 건강")
+
+    def test_127_wrong_key_and_corrupted_payload_fail_without_disclosure(self):
+        self.enable_subscription_registration()
+        self.client.post("/subscription/register", data=self.registration_form_data())
+        headers = {"Authorization": "Bearer registration-test-secret"}
+        original_key = self.app.config["SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY"]
+        self.app.config["SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY"] = (
+            "5CA4ejWD-gn8CZG1_Gqar825RDlSbbnRjHUw78-4WxY="
+        )
+        wrong_key = self.client.get(
+            "/api/subscription-registrations/pending", headers=headers
+        )
+        self.assertEqual(wrong_key.status_code, 503)
+        self.assertNotIn("member@example.invalid", wrong_key.get_data(as_text=True))
+        self.app.config["SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY"] = original_key
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                "UPDATE subscription_registration_payloads SET encrypted_payload='damaged'"
+            )
+        damaged = self.client.get(
+            "/api/subscription-registrations/pending", headers=headers
+        )
+        self.assertEqual(damaged.status_code, 503)
+        self.assertNotIn("member@example.invalid", damaged.get_data(as_text=True))
+
+    def test_128_complete_failure_keeps_payload_for_retry(self):
+        self.enable_subscription_registration()
+        self.client.post("/subscription/register", data=self.registration_form_data())
+        conn = connect(self.db_path)
+        public_id = conn.execute(
+            "SELECT public_id FROM subscription_registrations"
+        ).fetchone()[0]
+        conn.close()
+        response = self.client.post(
+            f"/api/subscription-registrations/{public_id}/complete",
+            headers={"Authorization": "Bearer registration-test-secret"},
+        )
+        self.assertEqual(response.status_code, 409)
+        conn = connect(self.db_path)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM subscription_registration_payloads").fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            conn.execute("SELECT status FROM subscription_registrations").fetchone()[0],
+            "pending",
+        )
+        conn.close()
+
+    def test_129_complete_deletes_payload_but_keeps_linked_dog_profile(self):
+        self.enable_subscription_registration()
+        self.client.post("/subscription/register", data=self.registration_form_data())
+        sync = self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": "member@example.invalid", "is_paid_subscriber": True},
+        )
+        self.assertEqual(sync.status_code, 201)
+        conn = connect(self.db_path)
+        public_id = conn.execute(
+            "SELECT public_id FROM subscription_registrations"
+        ).fetchone()[0]
+        conn.close()
+        completed = self.client.post(
+            f"/api/subscription-registrations/{public_id}/complete",
+            headers={"Authorization": "Bearer registration-test-secret"},
+        )
+        self.assertEqual(completed.status_code, 200)
+        conn = connect(self.db_path)
+        registration = conn.execute(
+            "SELECT id,subscriber_id,status FROM subscription_registrations"
+        ).fetchone()
+        dog = conn.execute(
+            "SELECT registration_id,subscriber_id,name FROM dog_profiles"
+        ).fetchone()
+        payload_count = conn.execute(
+            "SELECT COUNT(*) FROM subscription_registration_payloads"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(registration["status"], "completed")
+        self.assertEqual(payload_count, 0)
+        self.assertEqual(dog["registration_id"], registration["id"])
+        self.assertEqual(dog["subscriber_id"], registration["subscriber_id"])
+        self.assertEqual(dog["name"], "토리")
+
+    def test_130_missing_encryption_configuration_rolls_back_registration(self):
+        self.enable_subscription_registration()
+        self.app.config["SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY"] = ""
+        response = self.client.post(
+            "/subscription/register", data=self.registration_form_data()
+        )
+        self.assertEqual(response.status_code, 503)
+        conn = connect(self.db_path)
+        for table in (
+            "subscription_registrations",
+            "subscription_registration_payloads",
+            "dog_profiles",
+        ):
+            self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+        conn.close()
+
+    def test_131_additive_upgrade_from_plaintext_schema_uses_encrypted_payload(self):
+        legacy_path = str(Path(self.temp.name) / "legacy-registration.db")
+        legacy_app = create_app({
+            "TESTING": True,
+            "SECRET_KEY": "legacy-secret",
+            "DB_PATH": legacy_path,
+            "ENABLE_TEST_IDENTITY": False,
+            "SEED_DEMO_DATA": False,
+            "MIGRATION_HASH_SECRET": "migration-test-secret",
+            "SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY": (
+                "BVNXRQRh_hvpCeOkdlibHHdypT6aujBxlG5Oj_Rd7Ok="
+            ),
+        })
+        with transaction(legacy_path) as conn:
+            conn.execute("DROP TABLE subscription_registration_payloads")
+            conn.execute("DROP TABLE dog_profiles")
+            conn.execute("DROP TABLE subscription_registrations")
+            conn.executescript(
+                """
+                CREATE TABLE subscription_registrations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    public_id TEXT NOT NULL UNIQUE,
+                    subscriber_id INTEGER REFERENCES subscribers(id) ON DELETE SET NULL,
+                    email_hash TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    guardian_name TEXT NOT NULL,
+                    contact_phone TEXT NOT NULL,
+                    payer_name TEXT,
+                    plan_code TEXT NOT NULL CHECK(plan_code IN ('one-month','three-month')),
+                    registration_type TEXT NOT NULL CHECK(registration_type IN ('new','renewal')),
+                    interests TEXT,
+                    privacy_agreed_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+                """
+            )
+        legacy_app = create_app({
+            "TESTING": True,
+            "SECRET_KEY": "legacy-secret",
+            "DB_PATH": legacy_path,
+            "ENABLE_TEST_IDENTITY": False,
+            "SEED_DEMO_DATA": False,
+            "MIGRATION_HASH_SECRET": "migration-test-secret",
+            "SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY": (
+                "BVNXRQRh_hvpCeOkdlibHHdypT6aujBxlG5Oj_Rd7Ok="
+            ),
+        })
+        legacy_client = legacy_app.test_client()
+        with transaction(legacy_path) as conn:
+            conn.execute("UPDATE portal_settings SET subscription_page_enabled=1 WHERE id=1")
+        self.set_csrf(legacy_client, "registration-csrf")
+        response = legacy_client.post(
+            "/subscription/register", data=self.registration_form_data()
+        )
+        self.assertEqual(response.status_code, 302)
+        conn = connect(legacy_path)
+        legacy_row = conn.execute(
+            "SELECT email,guardian_name,contact_phone,payer_name,interests FROM subscription_registrations"
+        ).fetchone()
+        payload_count = conn.execute(
+            "SELECT COUNT(*) FROM subscription_registration_payloads"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(tuple(legacy_row), ("", "", "", None, None))
+        self.assertEqual(payload_count, 1)
 
 
 if __name__ == "__main__":
