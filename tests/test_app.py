@@ -3060,10 +3060,144 @@ class QuizAppTest(unittest.TestCase):
         self.assertIn(registration_id, html)
         self.assertIn("처리 완료", html)
         self.assertIn("completed", html)
-        self.assertIn("완료 후 삭제됨", html)
+        self.assertIn("처리 완료 · 개인정보 삭제", html)
         self.assertNotIn("completed-original@example.invalid", html)
         self.assertNotIn("완료 원본 보호자", html)
         self.assertNotIn("01022223333", html)
+
+    def test_135_admin_subscriber_management_requires_admin_and_shows_exact_states(self):
+        denied = self.client.get("/admin/subscribers")
+        self.assertEqual(denied.status_code, 302)
+        self.assertEqual(urlsplit(denied.headers["Location"]).path, "/admin/login")
+
+        with transaction(self.db_path) as conn:
+            paid_id = conn.execute(
+                """INSERT INTO subscribers
+                   (public_id,display_name,email_hash,is_test,is_active,is_paid_subscriber,created_at)
+                   VALUES(?,?,?,0,1,1,?)""",
+                (
+                    "sub_paid_visible",
+                    "현재 유료 회원",
+                    email_hash("private-paid@example.invalid", "migration-test-secret"),
+                    utcnow(),
+                ),
+            ).lastrowid
+            conn.execute(
+                """INSERT INTO subscribers
+                   (public_id,display_name,email_hash,is_test,is_active,is_paid_subscriber,created_at)
+                   VALUES(?,?,?,0,0,1,?)""",
+                (
+                    "sub_paid_inactive",
+                    "비활성 유료 회원",
+                    email_hash("private-inactive@example.invalid", "migration-test-secret"),
+                    utcnow(),
+                ),
+            )
+        _, episode, question_ids = self.ids()
+        self.finish_attempt(paid_id, episode, question_ids)
+
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+        response = self.client.get("/admin/subscribers")
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        for expected in (
+            "구독자 관리",
+            "현재 유료 회원",
+            "sub_paid_visible",
+            "현재 유료",
+            "비활성",
+            "현재 유료 아님",
+            "참여한 회차 수",
+        ):
+            self.assertIn(expected, html)
+        self.assertNotIn("무료/종료", html)
+        self.assertNotIn("private-paid@example.invalid", html)
+        self.assertRegex(
+            html,
+            r"sub_paid_visible</a></td><td>활성</td><td>현재 유료</td><td>1</td>",
+        )
+
+    def test_136_admin_dashboard_shows_unambiguous_subscriber_totals(self):
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO subscribers
+                   (public_id,display_name,is_test,is_active,is_paid_subscriber,created_at)
+                   VALUES('sub_paid_active','유료 활성',0,1,1,?)""",
+                (utcnow(),),
+            )
+            conn.execute(
+                """INSERT INTO subscribers
+                   (public_id,display_name,is_test,is_active,is_paid_subscriber,created_at)
+                   VALUES('sub_paid_inactive','유료 비활성',0,0,1,?)""",
+                (utcnow(),),
+            )
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+        html = self.client.get("/admin").get_data(as_text=True)
+        self.assertIn("구독자 관리", html)
+        self.assertIn("<span>전체 subscriber</span><strong>4</strong>", html)
+        self.assertIn("<span>현재 유료</span><strong>2</strong>", html)
+        self.assertIn("<span>현재 유료 아님</span><strong>2</strong>", html)
+        self.assertIn("<span>비활성 계정 (중복 가능)</span><strong>1</strong>", html)
+        self.assertIn("콘텐츠 현황", html)
+
+    def test_137_admin_registration_status_filters_and_completed_privacy_label(self):
+        self.enable_subscription_registration()
+        self.client.post(
+            "/subscription/register",
+            data=self.registration_form_data(
+                email="completed-filter@example.invalid",
+                guardian_name="완료 필터 보호자",
+            ),
+        )
+        conn = connect(self.db_path)
+        completed_id = conn.execute(
+            "SELECT public_id FROM subscription_registrations"
+        ).fetchone()[0]
+        conn.close()
+        self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={"email": "completed-filter@example.invalid"},
+        )
+        self.client.post(
+            f"/api/subscription-registrations/{completed_id}/complete",
+            headers={"Authorization": "Bearer registration-test-secret"},
+        )
+        self.client.post(
+            "/subscription/register",
+            data=self.registration_form_data(
+                email="pending-filter@example.invalid",
+                guardian_name="대기 필터 보호자",
+            ),
+        )
+        conn = connect(self.db_path)
+        pending_id = conn.execute(
+            """SELECT public_id FROM subscription_registrations
+               WHERE status='pending'"""
+        ).fetchone()[0]
+        conn.close()
+
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+        pending_html = self.client.get(
+            "/admin/subscription-registrations?status=pending"
+        ).get_data(as_text=True)
+        completed_html = self.client.get(
+            "/admin/subscription-registrations?status=completed"
+        ).get_data(as_text=True)
+        all_html = self.client.get(
+            "/admin/subscription-registrations?status=all"
+        ).get_data(as_text=True)
+        self.assertIn(pending_id, pending_html)
+        self.assertNotIn(completed_id, pending_html)
+        self.assertIn(completed_id, completed_html)
+        self.assertNotIn(pending_id, completed_html)
+        self.assertIn("처리 완료 · 개인정보 삭제", completed_html)
+        self.assertNotIn("완료 필터 보호자", completed_html)
+        self.assertIn(pending_id, all_html)
+        self.assertIn(completed_id, all_html)
 
 
 if __name__ == "__main__":
