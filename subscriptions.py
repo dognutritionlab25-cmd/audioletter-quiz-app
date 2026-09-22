@@ -4,7 +4,7 @@ from datetime import date
 
 from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, session, url_for
 
-from auth import current_subscriber_id
+from auth import admin_required, current_subscriber_id
 from db import connect, transaction, utcnow
 from registration_payloads import (
     RegistrationEncryptionConfigurationError,
@@ -289,6 +289,84 @@ def registration_complete():
     if not _registration_available():
         return render_template("subscription_registration_unavailable.html"), 403
     return render_template("subscription_registration_complete.html")
+
+
+@subscriptions_bp.get("/admin/subscription-registrations")
+@admin_required
+def admin_registration_list():
+    conn = connect(current_app.config["DB_PATH"])
+    rows = conn.execute(
+        """SELECT r.public_id,r.plan_code,r.registration_type,r.status,
+                  r.created_at,r.completed_at,p.encrypted_payload,
+                  d.name dog_name,d.birth_date dog_birth_date,d.breed dog_breed
+           FROM subscription_registrations r
+           LEFT JOIN subscription_registration_payloads p ON p.registration_id=r.id
+           LEFT JOIN dog_profiles d ON d.registration_id=r.id
+           ORDER BY r.created_at DESC,r.id DESC"""
+    ).fetchall()
+    conn.close()
+
+    registrations = []
+    for row in rows:
+        payload = {}
+        payload_state = None
+        if row["encrypted_payload"]:
+            try:
+                payload = decrypt_registration_payload(
+                    row["encrypted_payload"],
+                    row["public_id"],
+                    current_app.config.get(
+                        "SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY", ""
+                    ),
+                )
+            except RegistrationEncryptionConfigurationError:
+                payload_state = "암호화 키 설정 오류"
+                current_app.logger.error(
+                    "admin_registration_read_failed reason=encryption_configuration"
+                )
+            except RegistrationPayloadError:
+                payload_state = "원본 데이터 복호화 불가"
+                current_app.logger.error(
+                    "admin_registration_read_failed reason=payload_unavailable registration_id=%s",
+                    row["public_id"],
+                )
+        elif row["status"] == "completed":
+            payload_state = "완료 후 삭제됨"
+        else:
+            payload_state = "원본 데이터 없음"
+
+        registrations.append(
+            {
+                "public_id": row["public_id"],
+                "created_at": row["created_at"],
+                "completed_at": row["completed_at"],
+                "status": row["status"],
+                "status_label": {
+                    "pending": "처리 대기",
+                    "completed": "처리 완료",
+                    "cancelled": "취소",
+                }.get(row["status"], row["status"]),
+                "registration_type": REGISTRATION_TYPE_LABELS.get(
+                    row["registration_type"], row["registration_type"]
+                ),
+                "subscription_period": PLAN_LABELS.get(
+                    row["plan_code"], row["plan_code"]
+                ),
+                "guardian_name": payload.get("guardian_name"),
+                "payer_name": payload.get("payer_name"),
+                "email": payload.get("email"),
+                "contact_phone": payload.get("contact_phone"),
+                "interests": payload.get("interests"),
+                "dog_name": row["dog_name"],
+                "dog_birth_date": row["dog_birth_date"],
+                "dog_breed": row["dog_breed"],
+                "payload_state": payload_state,
+            }
+        )
+
+    return render_template(
+        "admin_subscription_registrations.html", registrations=registrations
+    )
 
 
 @subscriptions_bp.get("/api/subscription-registrations/pending")
