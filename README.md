@@ -20,6 +20,7 @@
 - Google Sheet/Make에서 전달받은 유료 상태와 현재 유료 구독자 전용 게시판
 - 구독자 게시글·댓글·좋아요와 관리자 숨김/삭제·새 글 이메일 알림
 - 공개 구독 안내·이용약관·개인정보처리방침과 관리자 결제 공개 설정
+- PayApp 결제 후 Portal 유료 구독 등록 신청과 Make용 안전한 조회·완료 API
 
 ## 파일 구조
 
@@ -35,6 +36,7 @@ quiz_csv_import.py     관리자 퀴즈 CSV 검증·중복 판정·Import
 resources.py           자료실 구독자 화면과 관리자 CRUD Blueprint
 community.py           유료 구독자 게시판과 관리자 관리 Blueprint
 public_pages.py        공개 안내·약관·개인정보·PayApp 이동·관리자 설정 Blueprint
+subscriptions.py       구독 등록 신청·dog profile·Make 연동 API Blueprint
 manage.py              관리·import CLI
 templates/             모바일/관리자 화면
 static/style.css       반응형 UI
@@ -78,6 +80,8 @@ python app.py
 | `SEED_DEMO_DATA` | 예 | 최초 demo 데이터가 필요할 때만 `true` |
 | `MIGRATION_HASH_SECRET` | 예 | 이메일 HMAC identity key. 등록 후 절대 임의 변경하지 않음 |
 | `SUBSCRIBER_SYNC_API_KEY` | Make 연동 시 예 | subscriber sync API 전용 긴 무작위 Bearer secret. 다른 secret과 재사용하지 않음 |
+| `SUBSCRIPTION_REGISTRATION_API_KEY` | 구독 등록 연동 시 예 | Make가 등록 신청을 조회·완료 처리할 때 쓰는 별도 Bearer secret |
+| `SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY` | 구독 등록 사용 시 예 | Make 전달 전 임시 개인정보 payload 전용 Fernet 키. 다른 secret과 재사용하지 않으며 설정 후 임의 변경하지 않음 |
 | `SESSION_COOKIE_SECURE` | 예 | Railway HTTPS에서는 `true` |
 | `SUBSCRIBER_SESSION_DAYS` | 예 | 인증 후 같은 브라우저 유지 기간. 권장 `180` |
 | `PUBLIC_BASE_URL` | 예 | Railway 공개 URL. 예: `https://...up.railway.app` |
@@ -107,6 +111,9 @@ python app.py
 - `subscribers.is_paid_subscriber`: Google Sheet/Make가 판단한 현재 유료 구독 상태. `is_active`와 별도
 - `community_posts`, `community_comments`, `community_likes`: 게시글·댓글·게시글별 subscriber 1회 좋아요
 - `portal_settings`: 결제 안내 공개 여부와 이용약관·개인정보처리방침 시행일(단일 설정 행)
+- `subscription_registrations`: 결제 후 입력한 유료 구독 등록 신청의 메타데이터·이메일 HMAC·처리 상태
+- `subscription_registration_payloads`: Make 처리 전까지만 보관하는 인증 암호화 개인정보 payload. 완료 처리와 같은 transaction에서 삭제
+- `dog_profiles`: 신청별 반려견 정보. subscriber sync 전에는 소유자가 비어 있고, sync 후 내부 subscriber ID에 연결
 
 `resources` 테이블은 앱 시작 시 `CREATE TABLE IF NOT EXISTS`로 추가됩니다. 기존 테이블이나 행을 변경·삭제하지 않는 additive schema 초기화입니다. 관리자는 `/admin/resources`, 로그인한 구독자는 `/resources`를 사용합니다.
 
@@ -119,7 +126,39 @@ python app.py
 - `/admin/portal-settings`: 관리자가 결제 페이지 공개 여부와 두 시행일을 저장합니다. 공개 OFF 상태에서도 로그인한 관리자는 결제 흐름을 미리 볼 수 있습니다.
 - PayApp 주소는 `public_pages.py`의 `PAYMENT_PLANS` 한 곳에서 관리합니다. 브라우저에는 내부 POST route만 제공되며, 공개 여부·CSRF·두 필수 동의를 서버에서 확인한 뒤 외부 결제 페이지로 이동합니다.
 
-이 기능에 필요한 새 환경변수는 없습니다. 배포 직후 기본 상태는 결제 페이지 **OFF**이므로, 약관·개인정보처리방침의 시행일과 화면 내용을 확인한 뒤 관리자가 명시적으로 공개해야 합니다.
+배포 직후 기본 상태는 결제 페이지 **OFF**이므로, 약관·개인정보처리방침의 시행일과 화면 내용을 확인한 뒤 관리자가 명시적으로 공개해야 합니다.
+
+## PayApp 결제 후 구독 등록
+
+`/subscription/register`는 기존 Google Form을 대체하는 공개 신청 화면입니다. 결제 페이지가 공개된 동안만 일반 방문자가 접근할 수 있고, 공개 OFF 상태에서는 관리자만 미리 볼 수 있습니다. 입력 필드는 구독 개월수, 보호자 이름, 반려견 이름, 이메일, 연락처, 선택적인 반려견 생일·견종·결제자 이름·관심 내용, 신규/재구독, 개인정보 동의입니다.
+
+신청 제출은 `subscription_registrations.status='pending'`과 `dog_profiles`만 만듭니다. subscriber를 만들거나 `is_paid_subscriber`를 변경하지 않습니다. 같은 이메일의 미처리 신청을 다시 제출하면 기존 pending 신청과 dog profile을 갱신하므로 중복 생성되지 않습니다. 완료된 신청 뒤의 재구독 신청은 별도 기록으로 생성할 수 있습니다.
+
+Make 전달에 필요한 이메일·보호자 이름·연락처·결제자 이름·관심 내용은 `subscription_registrations`에 원문으로 저장하지 않습니다. 별도 `subscription_registration_payloads`에 authenticated encryption(Fernet)으로 임시 보관하고, pending API에서만 서버가 복호화합니다. Make의 현재 JSON field mapping은 그대로 유지됩니다. `/complete`가 성공하면 encrypted payload는 즉시 삭제되며 신청 메타데이터, 이메일 HMAC과 subscriber에 연결된 `dog_profiles`는 유지됩니다.
+
+전용 키는 아래처럼 한 번 생성하여 Railway secret variable로 설정합니다. 기존 `APP_SECRET`, `MIGRATION_HASH_SECRET` 또는 API key를 재사용하면 안 됩니다.
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Make는 별도 `SUBSCRIPTION_REGISTRATION_API_KEY`를 사용합니다. API key는 `APP_SECRET`, `MIGRATION_HASH_SECRET`, `SUBSCRIBER_SYNC_API_KEY`와 재사용하지 않습니다.
+
+```http
+GET /api/subscription-registrations/pending?limit=20
+Authorization: Bearer <SUBSCRIPTION_REGISTRATION_API_KEY>
+```
+
+응답의 `registrations[]`에는 기존 Form 응답 Sheet로 매핑할 등록정보와 불투명한 `registration_id`가 포함됩니다. 이메일과 연락처가 포함되므로 응답에는 `Cache-Control: no-store`가 적용되며 endpoint는 올바른 Bearer key 없이는 열리지 않습니다.
+
+Make의 실제 결제 검증, 구독자명단 추가, 기존 `POST /api/subscribers/sync` 성공과 최종 알림톡까지 모두 끝난 뒤 다음 endpoint를 호출합니다.
+
+```http
+POST /api/subscription-registrations/<registration_id>/complete
+Authorization: Bearer <SUBSCRIPTION_REGISTRATION_API_KEY>
+```
+
+완료 endpoint는 subscriber sync로 신청과 subscriber가 먼저 연결되지 않았다면 `409`를 반환합니다. 반복 호출은 `unchanged`로 안전하게 성공합니다. Portal 신청은 결제 인증이 아니며, 유료 권한은 기존 sync API에 Google Sheet/Make가 명시적으로 `"is_paid_subscriber": true`를 보낸 경우에만 생깁니다.
 
 ### Make의 유료 상태 전달
 

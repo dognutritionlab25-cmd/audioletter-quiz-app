@@ -185,6 +185,41 @@ CREATE TABLE IF NOT EXISTS portal_settings (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS subscription_registrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id TEXT NOT NULL UNIQUE,
+    subscriber_id INTEGER REFERENCES subscribers(id) ON DELETE SET NULL,
+    email_hash TEXT NOT NULL,
+    plan_code TEXT NOT NULL CHECK(plan_code IN ('one-month','three-month')),
+    registration_type TEXT NOT NULL CHECK(registration_type IN ('new','renewal')),
+    privacy_agreed_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','completed','cancelled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS subscription_registration_payloads (
+    registration_id INTEGER PRIMARY KEY
+        REFERENCES subscription_registrations(id) ON DELETE CASCADE,
+    encrypted_payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dog_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscriber_id INTEGER REFERENCES subscribers(id) ON DELETE SET NULL,
+    registration_id INTEGER NOT NULL UNIQUE
+        REFERENCES subscription_registrations(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    birth_date TEXT,
+    breed TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_questions_episode ON questions(episode_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_attempts_subscriber_episode ON quiz_attempts(subscriber_id, episode_id);
 CREATE INDEX IF NOT EXISTS idx_participation_subscriber ON participation(subscriber_id);
@@ -199,6 +234,14 @@ CREATE INDEX IF NOT EXISTS idx_community_comments_post
     ON community_comments(post_id, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_community_likes_post
     ON community_likes(post_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_subscription_registration_pending_email
+    ON subscription_registrations(email_hash) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS idx_subscription_registrations_status_created
+    ON subscription_registrations(status,created_at,id);
+CREATE INDEX IF NOT EXISTS idx_subscription_registrations_subscriber
+    ON subscription_registrations(subscriber_id);
+CREATE INDEX IF NOT EXISTS idx_dog_profiles_subscriber
+    ON dog_profiles(subscriber_id);
 """
 
 

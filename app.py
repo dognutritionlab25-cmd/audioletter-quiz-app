@@ -33,6 +33,7 @@ from presenters import feedback_summary, format_korean_datetime
 from public_pages import public_pages_bp
 from quiz_csv_import import import_quiz_rows, parse_quiz_csv, preview_quiz_import
 from resources import resources_bp
+from subscriptions import subscriptions_bp
 from services import (
     complete_attempt,
     email_hash,
@@ -58,6 +59,12 @@ def create_app(test_config=None):
         SEED_DEMO_DATA=os.environ.get("SEED_DEMO_DATA", "false").lower() == "true",
         MIGRATION_HASH_SECRET=os.environ.get("MIGRATION_HASH_SECRET") or os.environ.get("APP_SECRET", "dev-only"),
         SUBSCRIBER_SYNC_API_KEY=os.environ.get("SUBSCRIBER_SYNC_API_KEY", ""),
+        SUBSCRIPTION_REGISTRATION_API_KEY=os.environ.get(
+            "SUBSCRIPTION_REGISTRATION_API_KEY", ""
+        ),
+        SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY=os.environ.get(
+            "SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY", ""
+        ),
         BREVO_API_KEY=os.environ.get("BREVO_API_KEY", ""),
         MAGIC_LINK_SENDER_EMAIL=os.environ.get("MAGIC_LINK_SENDER_EMAIL", ""),
         MAGIC_LINK_SENDER_NAME=os.environ.get("MAGIC_LINK_SENDER_NAME", ""),
@@ -99,13 +106,18 @@ def create_app(test_config=None):
     app.register_blueprint(resources_bp)
     app.register_blueprint(community_bp)
     app.register_blueprint(public_pages_bp)
+    app.register_blueprint(subscriptions_bp)
 
     @app.before_request
     def verify_csrf():
         # The Make sync endpoint authenticates with its own bearer secret and
         # does not use a browser session. Keep the exemption limited to this
         # single endpoint; all form POST routes retain CSRF protection.
-        if request.method == "POST" and request.endpoint != "subscriber_sync":
+        api_csrf_exempt_endpoints = {
+            "subscriber_sync",
+            "subscriptions.complete_registration_api",
+        }
+        if request.method == "POST" and request.endpoint not in api_csrf_exempt_endpoints:
             supplied = request.form.get("csrf_token", "")
             expected = session.get("csrf_token", "")
             if not expected or not secrets.compare_digest(supplied, expected):
@@ -230,6 +242,22 @@ def create_app(test_config=None):
                        FROM subscribers WHERE id=?""",
                     (subscriber["id"],),
                 ).fetchone()
+
+            # A registration request is only an application. Linking it to the
+            # verified subscriber keeps its dog profile, but paid access is
+            # still controlled exclusively by the explicit paid sync field.
+            conn.execute(
+                """UPDATE subscription_registrations SET subscriber_id=?,updated_at=?
+                   WHERE email_hash=? AND subscriber_id IS NULL""",
+                (subscriber["id"], utcnow(), digest),
+            )
+            conn.execute(
+                """UPDATE dog_profiles SET subscriber_id=?,updated_at=?
+                   WHERE subscriber_id IS NULL AND registration_id IN (
+                       SELECT id FROM subscription_registrations WHERE email_hash=?
+                   )""",
+                (subscriber["id"], utcnow(), digest),
+            )
 
         status = "created" if inserted else "updated" if changed else "unchanged"
         return {
