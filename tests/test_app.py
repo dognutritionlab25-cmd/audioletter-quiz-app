@@ -2970,6 +2970,101 @@ class QuizAppTest(unittest.TestCase):
         self.assertEqual(tuple(legacy_row), ("", "", "", None, None))
         self.assertEqual(payload_count, 1)
 
+    def test_132_admin_registration_list_requires_admin_authentication(self):
+        response = self.client.get("/admin/subscription-registrations")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            urlsplit(response.headers["Location"]).path,
+            "/admin/login",
+        )
+
+    def test_133_admin_registration_list_shows_pending_original_submission(self):
+        self.enable_subscription_registration()
+        self.client.post(
+            "/subscription/register",
+            data=self.registration_form_data(
+                guardian_name="원본 보호자",
+                payer_name="원본 결제자",
+                dog_name="원본 반려견",
+                email="original@example.invalid",
+                contact_phone="010-9876-5432",
+                dog_birth_date="2019-04-03",
+                dog_breed="푸들",
+                interests="신장 건강",
+            ),
+        )
+        conn = connect(self.db_path)
+        registration_id = conn.execute(
+            "SELECT public_id FROM subscription_registrations"
+        ).fetchone()[0]
+        conn.close()
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+        dashboard = self.client.get("/admin").get_data(as_text=True)
+        self.assertIn("구독 신청 관리", dashboard)
+        response = self.client.get("/admin/subscription-registrations")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        html = response.get_data(as_text=True)
+        for expected in (
+            "원본 보호자",
+            "원본 결제자",
+            "원본 반려견",
+            "original@example.invalid",
+            "01098765432",
+            "2019-04-03",
+            "푸들",
+            "신장 건강",
+            registration_id,
+            "신규",
+            "3개월",
+            "처리 대기",
+            "pending",
+        ):
+            self.assertIn(expected, html)
+
+    def test_134_admin_registration_list_shows_completed_without_reconstructed_pii(self):
+        self.enable_subscription_registration()
+        self.client.post(
+            "/subscription/register",
+            data=self.registration_form_data(
+                email="completed-original@example.invalid",
+                guardian_name="완료 원본 보호자",
+                contact_phone="010-2222-3333",
+            ),
+        )
+        self.client.post(
+            "/api/subscribers/sync",
+            headers={"Authorization": "Bearer sync-test-secret"},
+            json={
+                "email": "completed-original@example.invalid",
+                "display_name": "다른 표시명",
+                "is_paid_subscriber": True,
+            },
+        )
+        conn = connect(self.db_path)
+        registration_id = conn.execute(
+            "SELECT public_id FROM subscription_registrations"
+        ).fetchone()[0]
+        conn.close()
+        completed = self.client.post(
+            f"/api/subscription-registrations/{registration_id}/complete",
+            headers={"Authorization": "Bearer registration-test-secret"},
+        )
+        self.assertEqual(completed.status_code, 200)
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+        response = self.client.get("/admin/subscription-registrations")
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn(registration_id, html)
+        self.assertIn("처리 완료", html)
+        self.assertIn("completed", html)
+        self.assertIn("완료 후 삭제됨", html)
+        self.assertNotIn("completed-original@example.invalid", html)
+        self.assertNotIn("완료 원본 보호자", html)
+        self.assertNotIn("01022223333", html)
+
 
 if __name__ == "__main__":
     unittest.main()
