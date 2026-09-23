@@ -3199,6 +3199,259 @@ class QuizAppTest(unittest.TestCase):
         self.assertIn(pending_id, all_html)
         self.assertIn(completed_id, all_html)
 
+    def test_138_admin_subscriber_detail_shows_real_activity_without_email_hash(self):
+        subscriber_id = self.create_community_subscriber(
+            "detail-private@example.invalid", "상세 확인 회원", paid=False
+        )
+        _, episode, question_ids = self.ids()
+        self.finish_attempt(subscriber_id, episode, question_ids)
+        conn = connect(self.db_path)
+        feedback_questions = conn.execute(
+            """SELECT id,response_type FROM feedback_questions
+               WHERE episode_id=? ORDER BY display_order""",
+            (episode["id"],),
+        ).fetchall()
+        stored_hash = conn.execute(
+            "SELECT email_hash FROM subscribers WHERE id=?", (subscriber_id,)
+        ).fetchone()[0]
+        conn.close()
+        save_feedback(
+            self.db_path,
+            episode["id"],
+            subscriber_id,
+            {
+                feedback_questions[0]["id"]: ["핵심 개념"],
+                feedback_questions[1]["id"]: "5",
+            },
+        )
+
+        denied = self.client.get(f"/admin/subscribers/{subscriber_id}")
+        self.assertEqual(denied.status_code, 302)
+        self.assertEqual(urlsplit(denied.headers["Location"]).path, "/admin/login")
+
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+        response = self.client.get(f"/admin/subscribers/{subscriber_id}")
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        for expected in (
+            "상세 확인 회원",
+            "현재 유료 아님",
+            "Quiz 시도",
+            "완료 시도",
+            "피드백",
+            "R041",
+            "삭제 영향 확인",
+        ):
+            self.assertIn(expected, html)
+        self.assertNotIn("detail-private@example.invalid", html)
+        self.assertNotIn(stored_hash, html)
+
+    def test_139_admin_subscriber_delete_is_confirmed_atomic_and_fk_safe(self):
+        target_id = self.create_community_subscriber(
+            "delete-target@example.invalid", "삭제 대상", paid=True
+        )
+        other_id = self.create_community_subscriber(
+            "delete-other@example.invalid", "보존 대상", paid=True
+        )
+        _, episode, question_ids = self.ids()
+        self.finish_attempt(target_id, episode, question_ids)
+        conn = connect(self.db_path)
+        feedback_question = conn.execute(
+            """SELECT id FROM feedback_questions WHERE episode_id=?
+               ORDER BY display_order LIMIT 1""",
+            (episode["id"],),
+        ).fetchone()[0]
+        conn.close()
+        save_feedback(
+            self.db_path,
+            episode["id"],
+            target_id,
+            {feedback_question: ["핵심 개념"]},
+        )
+        create_magic_link_token(self.db_path, target_id, "/", 15)
+        target_post = self.create_community_post(target_id, "삭제될 글")
+        other_post = self.create_community_post(other_id, "보존될 글")
+        now = utcnow()
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO legacy_participation
+                   (subscriber_id,season_code,participation_count,note,updated_at)
+                   VALUES(?, 'S1', 2, '삭제 테스트', ?)""",
+                (target_id, now),
+            )
+            conn.execute(
+                """INSERT INTO community_comments
+                   (post_id,subscriber_id,body,created_at) VALUES(?,?,?,?)""",
+                (other_post, target_id, "대상이 쓴 댓글", now),
+            )
+            conn.execute(
+                """INSERT INTO community_comments
+                   (post_id,subscriber_id,body,created_at) VALUES(?,?,?,?)""",
+                (target_post, other_id, "대상 글의 타인 댓글", now),
+            )
+            conn.execute(
+                """INSERT INTO community_likes
+                   (post_id,subscriber_id,created_at) VALUES(?,?,?)""",
+                (other_post, target_id, now),
+            )
+            conn.execute(
+                """INSERT INTO community_likes
+                   (post_id,subscriber_id,created_at) VALUES(?,?,?)""",
+                (target_post, other_id, now),
+            )
+            registration_id = conn.execute(
+                """INSERT INTO subscription_registrations
+                   (public_id,subscriber_id,email_hash,plan_code,registration_type,
+                    privacy_agreed_at,status,created_at,updated_at,completed_at)
+                   VALUES(?,?,?,?,?,?,'completed',?,?,?)""",
+                (
+                    "reg_delete_target",
+                    target_id,
+                    email_hash("delete-target@example.invalid", "migration-test-secret"),
+                    "one-month",
+                    "new",
+                    now,
+                    now,
+                    now,
+                    now,
+                ),
+            ).lastrowid
+            conn.execute(
+                """INSERT INTO dog_profiles
+                   (subscriber_id,registration_id,name,created_at,updated_at)
+                   VALUES(?,?,?,?,?)""",
+                (target_id, registration_id, "보존견", now, now),
+            )
+
+        delete_path = f"/admin/subscribers/{target_id}/delete"
+        denied = self.client.get(delete_path)
+        self.assertEqual(denied.status_code, 302)
+        with self.client.session_transaction() as state:
+            state["csrf_token"] = "anonymous-delete-csrf"
+        denied_post = self.client.post(
+            delete_path,
+            data={
+                "csrf_token": "anonymous-delete-csrf",
+                "confirm_delete": "yes",
+            },
+        )
+        self.assertEqual(denied_post.status_code, 302)
+        self.assertEqual(
+            urlsplit(denied_post.headers["Location"]).path, "/admin/login"
+        )
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "delete-csrf"
+        confirmation = self.client.get(delete_path)
+        self.assertEqual(confirmation.status_code, 200)
+        confirmation_html = confirmation.get_data(as_text=True)
+        self.assertIn("삭제 대상", confirmation_html)
+        self.assertIn("복구할 수 없습니다", confirmation_html)
+        self.assertIn("보존되지만 subscriber 연결이 해제", confirmation_html)
+        conn = connect(self.db_path)
+        self.assertIsNotNone(
+            conn.execute("SELECT id FROM subscribers WHERE id=?", (target_id,)).fetchone()
+        )
+        conn.close()
+
+        self.assertEqual(
+            self.client.post(
+                delete_path, data={"confirm_delete": "yes"}
+            ).status_code,
+            400,
+        )
+        deleted = self.client.post(
+            delete_path,
+            data={"csrf_token": "delete-csrf", "confirm_delete": "yes"},
+        )
+        self.assertEqual(deleted.status_code, 302)
+        self.assertEqual(urlsplit(deleted.headers["Location"]).path, "/admin/subscribers")
+
+        conn = connect(self.db_path)
+        self.assertIsNone(
+            conn.execute("SELECT id FROM subscribers WHERE id=?", (target_id,)).fetchone()
+        )
+        for table in (
+            "quiz_attempts",
+            "participation",
+            "legacy_participation",
+            "feedback_submissions",
+            "magic_link_tokens",
+            "community_posts",
+            "community_comments",
+            "community_likes",
+        ):
+            self.assertEqual(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE subscriber_id=?",
+                    (target_id,),
+                ).fetchone()[0],
+                0,
+            )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM attempt_answers").fetchone()[0], 0
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM feedback_answers").fetchone()[0], 0
+        )
+        self.assertIsNotNone(
+            conn.execute("SELECT id FROM subscribers WHERE id=?", (other_id,)).fetchone()
+        )
+        self.assertIsNotNone(
+            conn.execute("SELECT id FROM community_posts WHERE id=?", (other_post,)).fetchone()
+        )
+        self.assertIsNone(
+            conn.execute("SELECT id FROM community_posts WHERE id=?", (target_post,)).fetchone()
+        )
+        registration = conn.execute(
+            "SELECT subscriber_id FROM subscription_registrations WHERE id=?",
+            (registration_id,),
+        ).fetchone()
+        dog = conn.execute(
+            "SELECT subscriber_id,name FROM dog_profiles WHERE registration_id=?",
+            (registration_id,),
+        ).fetchone()
+        conn.close()
+        self.assertIsNone(registration["subscriber_id"])
+        self.assertIsNone(dog["subscriber_id"])
+        self.assertEqual(dog["name"], "보존견")
+
+    def test_140_subscriber_delete_failure_rolls_back_partial_work(self):
+        target_id = self.create_community_subscriber(
+            "delete-rollback@example.invalid", "롤백 대상", paid=True
+        )
+        create_magic_link_token(self.db_path, target_id, "/", 15)
+
+        def fail_after_first_delete(conn, subscriber_id):
+            conn.execute(
+                "DELETE FROM magic_link_tokens WHERE subscriber_id=?",
+                (subscriber_id,),
+            )
+            raise RuntimeError("forced deletion failure")
+
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "rollback-csrf"
+        with patch("app.delete_subscriber_data", side_effect=fail_after_first_delete):
+            response = self.client.post(
+                f"/admin/subscribers/{target_id}/delete",
+                data={"csrf_token": "rollback-csrf", "confirm_delete": "yes"},
+            )
+        self.assertEqual(response.status_code, 302)
+        conn = connect(self.db_path)
+        self.assertIsNotNone(
+            conn.execute("SELECT id FROM subscribers WHERE id=?", (target_id,)).fetchone()
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM magic_link_tokens WHERE subscriber_id=?",
+                (target_id,),
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
