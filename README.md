@@ -84,7 +84,7 @@ python app.py
 | `SUBSCRIPTION_REGISTRATION_ENCRYPTION_KEY` | 구독 등록 사용 시 예 | Make 전달 전 임시 개인정보 payload 전용 Fernet 키. 다른 secret과 재사용하지 않으며 설정 후 임의 변경하지 않음 |
 | `SESSION_COOKIE_SECURE` | 예 | Railway HTTPS에서는 `true` |
 | `SUBSCRIBER_SESSION_DAYS` | 예 | 인증 후 같은 브라우저 유지 기간. 권장 `180` |
-| `PUBLIC_BASE_URL` | 예 | Railway 공개 URL. 예: `https://...up.railway.app` |
+| `PUBLIC_BASE_URL` | 예 | 사용자에게 발송할 공식 Portal URL. Production 값: `https://portal.dognutritionlab.com` |
 | `BREVO_API_KEY` | 예 | Brevo Transactional Email API key |
 | `MAGIC_LINK_SENDER_EMAIL` | 예 | Brevo에서 확인된 발신 이메일 |
 | `MAGIC_LINK_SENDER_NAME` | 예 | 메일에 표시할 발신자 이름 |
@@ -252,7 +252,7 @@ Magic Link token은 기본 15분 뒤 만료되며 한 번 사용하면 다시 �
 1. Brevo에서 Transactional Email을 보낼 발신 이메일/도메인을 확인합니다.
 2. Brevo API key를 새로 만들고 Railway의 `BREVO_API_KEY`에 저장합니다.
 3. 확인된 주소와 표시 이름을 `MAGIC_LINK_SENDER_EMAIL`, `MAGIC_LINK_SENDER_NAME`에 저장합니다.
-4. `PUBLIC_BASE_URL`을 현재 Railway 공개 URL로 설정합니다.
+4. `PUBLIC_BASE_URL=https://portal.dognutritionlab.com`으로 설정합니다. Magic Link는 이 값을 기준으로 생성되므로 Railway generated domain을 넣지 않습니다.
 5. 관리자에서 본인이 받을 수 있는 테스트 이메일을 실제 subscriber로 등록합니다.
 6. `ENABLE_TEST_IDENTITY=false`, `SEED_DEMO_DATA=false`인 상태에서 비공개 테스트 회차 URL에 접속해 메일 수신, 원래 회차 복귀, 재사용 차단을 확인합니다.
 
