@@ -43,6 +43,7 @@ from services import (
     start_attempt,
     subscriber_counts,
 )
+from subscriber_admin import delete_subscriber_data, subscriber_deletion_summary
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -875,12 +876,84 @@ def create_app(test_config=None):
             (subscriber_id,),
         ).fetchone()
         breakdown = participation_breakdown(conn, subscriber_id)
+        activity = conn.execute(
+            """SELECT
+                   (SELECT COUNT(*) FROM quiz_attempts
+                    WHERE subscriber_id=?) quiz_attempts,
+                   (SELECT COUNT(*) FROM quiz_attempts
+                    WHERE subscriber_id=? AND status='completed') completed_attempts,
+                   (SELECT COUNT(*) FROM feedback_submissions
+                    WHERE subscriber_id=?) feedback_submissions,
+                   (SELECT COUNT(*) FROM community_posts
+                    WHERE subscriber_id=?) community_posts,
+                   (SELECT COUNT(*) FROM community_comments
+                    WHERE subscriber_id=?) community_comments,
+                   (SELECT COUNT(*) FROM community_likes
+                    WHERE subscriber_id=?) community_likes,
+                   (SELECT MAX(first_completed_at) FROM participation
+                    WHERE subscriber_id=?) last_participation""",
+            (subscriber_id,) * 7,
+        ).fetchone()
+        participations = conn.execute(
+            """SELECT e.code,e.title,p.first_completed_at,p.source
+               FROM participation p
+               JOIN episodes e ON e.id=p.episode_id
+               WHERE p.subscriber_id=?
+               ORDER BY p.first_completed_at DESC,p.id DESC""",
+            (subscriber_id,),
+        ).fetchall()
         conn.close()
         return render_template(
             "admin_subscriber_detail.html",
             person=person,
             legacy=legacy,
             breakdown=breakdown,
+            activity=activity,
+            participations=participations,
+        )
+
+    @app.route(
+        "/admin/subscribers/<int:subscriber_id>/delete", methods=["GET", "POST"]
+    )
+    @admin_required
+    def admin_subscriber_delete(subscriber_id):
+        conn = db()
+        person = conn.execute(
+            """SELECT id,public_id,display_name,is_test,is_active,
+                      is_paid_subscriber
+               FROM subscribers WHERE id=?""",
+            (subscriber_id,),
+        ).fetchone()
+        if not person:
+            conn.close()
+            abort(404)
+        summary = subscriber_deletion_summary(conn, subscriber_id)
+        conn.close()
+
+        if request.method == "POST":
+            if request.form.get("confirm_delete") != "yes":
+                flash("복구 불가 삭제 확인에 동의해야 합니다.", "error")
+                return redirect(
+                    url_for("admin_subscriber_delete", subscriber_id=subscriber_id)
+                )
+            try:
+                with transaction(app.config["DB_PATH"]) as conn:
+                    if not delete_subscriber_data(conn, subscriber_id):
+                        abort(404)
+            except Exception:
+                app.logger.exception(
+                    "admin_subscriber_delete_failed subscriber_public_id=%s",
+                    person["public_id"],
+                )
+                flash("구독자를 삭제하지 못했습니다. 데이터는 변경되지 않았습니다.", "error")
+                return redirect(
+                    url_for("admin_subscriber_delete", subscriber_id=subscriber_id)
+                )
+            flash("구독자와 연결된 운영 기록을 삭제했습니다.", "success")
+            return redirect(url_for("admin_subscribers"))
+
+        return render_template(
+            "admin_subscriber_delete.html", person=person, summary=summary
         )
 
     @app.get("/admin/episodes/<int:episode_id>/feedback")
