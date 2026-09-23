@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+{% block title %}구독자 삭제 확인 · 반려견영양연구소{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('admin_subscriber_detail', subscriber_id=person.id) }}">← 구독자 상세</a></p>
+<p class="eyebrow">ADMIN</p>
+<h1>구독자 삭제 확인</h1>
+
+<section class="card">
+  <p><strong>대상</strong><br>{{ person.display_name or '-' }}</p>
+  <p><strong>public_id</strong><br><code>{{ person.public_id }}</code></p>
+  <p><strong>계정 상태</strong><br>{{ '활성' if person.is_active else '비활성' }}</p>
+  <p><strong>유료 상태</strong><br>{{ '현재 유료' if person.is_paid_subscriber else '현재 유료 아님' }}</p>
+</section>
+
+<h2>함께 삭제되는 기록</h2>
+<div class="table-wrap"><table><tbody>
+  <tr><th>Quiz 시도</th><td>{{ summary.quiz_attempts }}</td></tr>
+  <tr><th>문항 답변</th><td>{{ summary.attempt_answers }}</td></tr>
+  <tr><th>인정 참여</th><td>{{ summary.participation }}</td></tr>
+  <tr><th>과거 참여 기록</th><td>{{ summary.legacy_participation }}</td></tr>
+  <tr><th>피드백 제출</th><td>{{ summary.feedback_submissions }}</td></tr>
+  <tr><th>피드백 답변</th><td>{{ summary.feedback_answers }}</td></tr>
+  <tr><th>Magic Link token</th><td>{{ summary.magic_link_tokens }}</td></tr>
+  <tr><th>게시글</th><td>{{ summary.community_posts }}</td></tr>
+  <tr><th>댓글</th><td>{{ summary.community_comments }}</td></tr>
+  <tr><th>좋아요</th><td>{{ summary.community_likes }}</td></tr>
+</tbody></table></div>
+<p class="notice">삭제 대상의 게시글에 다른 구독자가 남긴 댓글과 좋아요도 게시글과 함께 삭제됩니다.</p>
+
+<h2>보존되지만 subscriber 연결이 해제되는 기록</h2>
+<div class="table-wrap"><table><tbody>
+  <tr><th>구독 신청</th><td>{{ summary.linked_registrations }}</td></tr>
+  <tr><th>반려견 프로필</th><td>{{ summary.linked_dog_profiles }}</td></tr>
+</tbody></table></div>
+
+<section class="card">
+  <p><strong>이 작업은 복구할 수 없습니다.</strong></p>
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label class="agreement"><input type="checkbox" name="confirm_delete" value="yes" required> 위 삭제 범위와 복구 불가 경고를 확인했습니다.</label>
+    <button class="link-danger" type="submit">구독자 영구 삭제</button>
+  </form>
+</section>
+{% endblock %}
