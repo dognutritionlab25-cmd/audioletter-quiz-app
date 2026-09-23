@@ -88,7 +88,7 @@ class QuizAppTest(unittest.TestCase):
             "ENABLE_TEST_IDENTITY": False,
             "SEED_DEMO_DATA": False,
             "MIGRATION_HASH_SECRET": "migration-test-secret",
-            "PUBLIC_BASE_URL": "https://quiz.example.test",
+            "PUBLIC_BASE_URL": "https://portal.dognutritionlab.com",
             "MAGIC_LINK_TTL_MINUTES": 15,
             "MAGIC_LINK_REQUEST_COOLDOWN_SECONDS": 0,
             "MAGIC_LINK_SENDER": sender,
@@ -686,7 +686,7 @@ class QuizAppTest(unittest.TestCase):
         with patch("magic_links.urllib.request.urlopen", return_value=FakeResponse()) as mocked:
             send_magic_link_via_brevo(
                 "member@example.invalid",
-                "https://quiz.example.test/auth/verify?token=safe-test-token",
+                "https://portal.dognutritionlab.com/auth/verify?token=safe-test-token",
                 config,
             )
         request = mocked.call_args.args[0]
@@ -3451,6 +3451,58 @@ class QuizAppTest(unittest.TestCase):
             1,
         )
         conn.close()
+
+    def test_141_official_portal_domain_magic_link_keeps_authenticated_browser_on_portal(self):
+        subscriber_id = self.create_real_subscriber(
+            email="portal-domain@example.invalid", display_name="공식 도메인 회원"
+        )
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                "UPDATE subscribers SET is_paid_subscriber=1 WHERE id=?",
+                (subscriber_id,),
+            )
+        sent = []
+        _, client = self.production_client(
+            lambda email, url, config: sent.append((email, url))
+        )
+        with client.session_transaction(
+            base_url="https://portal.dognutritionlab.com"
+        ) as state:
+            state["csrf_token"] = "portal-domain-csrf"
+        csrf = "portal-domain-csrf"
+        requested = client.post(
+            "/auth/email",
+            base_url="https://portal.dognutritionlab.com",
+            data={
+                "csrf_token": csrf,
+                "email": "portal-domain@example.invalid",
+                "next": "/community",
+            },
+        )
+        self.assertEqual(requested.status_code, 200)
+        self.assertEqual(len(sent), 1)
+        magic_url = sent[0][1]
+        parsed = urlsplit(magic_url)
+        self.assertEqual(parsed.scheme, "https")
+        self.assertEqual(parsed.netloc, "portal.dognutritionlab.com")
+        self.assertEqual(parsed.path, "/auth/verify")
+        self.assertNotIn("audioletter-quiz-app-production.up.railway.app", magic_url)
+
+        verified = client.get(
+            f"{parsed.path}?{parsed.query}",
+            base_url="https://portal.dognutritionlab.com",
+        )
+        self.assertEqual(verified.status_code, 302)
+        self.assertEqual(verified.headers["Location"], "/community")
+        community = client.get(
+            verified.headers["Location"],
+            base_url="https://portal.dognutritionlab.com",
+        )
+        self.assertEqual(community.status_code, 200)
+        with client.session_transaction(
+            base_url="https://portal.dognutritionlab.com"
+        ) as state:
+            self.assertEqual(state["subscriber_id"], subscriber_id)
 
 
 if __name__ == "__main__":
