@@ -6,11 +6,21 @@
 <section class="card"><form method="post" class="form-grid">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <label>표시 순서<input type="number" name="sort_order" min="1" required value="{{ block.sort_order }}"></label>
-  <label>블록 유형<select name="block_type"><option value="audio" {% if block.block_type == 'audio' %}selected{% endif %}>오디오</option><option value="info" {% if block.block_type == 'info' %}selected{% endif %}>정보 / 텍스트</option></select></label>
+  <label>블록 유형<select name="block_type" id="block-type"><option value="audio" {% if block.block_type == 'audio' %}selected{% endif %}>Audio</option><option value="info" {% if block.block_type == 'info' %}selected{% endif %}>Info</option></select></label>
   <label class="wide">제목 또는 라벨<input name="title" maxlength="200" value="{{ block.title or '' }}"></label>
-  <label class="wide">정보 블록 내용<textarea name="body" rows="12">{{ block.body or '' }}</textarea></label>
-  <label class="wide">오디오 저장 키 (오디오 블록)<input name="audio_storage_key" value="{{ block.audio_storage_key or '' }}" placeholder="예: audioletters/season1/008-extra.mp3"></label>
-  <label class="wide">오디오 전체 스크립트<textarea name="transcript" rows="14">{{ block.transcript or '' }}</textarea></label>
+  <label class="wide" data-block-field="info">본문<textarea name="body" rows="12">{{ block.body or '' }}</textarea></label>
+  <label class="wide" data-block-field="audio">오디오 저장 키<input name="audio_storage_key" value="{{ block.audio_storage_key or '' }}" placeholder="예: audioletters/season1/008-extra.mp3"></label>
+  <label class="wide" data-block-field="audio">스크립트<textarea name="transcript" rows="14">{{ block.transcript or '' }}</textarea></label>
   <button class="primary">저장</button>
 </form></section>
+<script>
+  const blockType = document.getElementById('block-type');
+  function showBlockFields() {
+    document.querySelectorAll('[data-block-field]').forEach(field => {
+      field.hidden = field.dataset.blockField !== blockType.value;
+    });
+  }
+  blockType.addEventListener('change', showBlockFields);
+  showBlockFields();
+</script>
 {% endblock %}

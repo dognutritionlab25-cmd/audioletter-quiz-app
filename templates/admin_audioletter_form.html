@@ -12,10 +12,26 @@
     <label>시즌<input type="number" name="season" min="1" required value="{{ episode.season if episode and episode.season is not none else '' }}" placeholder="예: 2"></label>
     <label>시즌 내 회차<input type="number" name="season_episode" min="1" required value="{{ episode.season_episode if episode and episode.season_episode is not none else '' }}" placeholder="예: 1"></label>
     <label class="wide">제목<input name="title" required maxlength="200" value="{{ episode.title if episode else '' }}"></label>
-    <label class="wide">오디오 저장 키<input name="audio_storage_key" value="{{ episode.audio_storage_key if episode and episode.audio_storage_key else '' }}" placeholder="향후 비공개 저장소의 객체 키"></label>
-    <label class="wide">전체 스크립트<textarea name="transcript" rows="18">{{ episode.transcript if episode else '' }}</textarea></label>
+    {% if not blocks %}
+    <label class="wide" id="legacy-audio-fields">기존 단일 오디오 저장 키<input name="audio_storage_key" value="{{ episode.audio_storage_key if episode and episode.audio_storage_key else '' }}" placeholder="비공개 저장소의 객체 키"></label>
+    <label class="wide">기존 단일 오디오 전체 스크립트<textarea name="transcript" rows="18">{{ episode.transcript if episode else '' }}</textarea></label>
+    {% else %}<p class="wide">이 회차의 오디오와 본문은 아래 블록에서 수정합니다. 기존 단일 오디오 값은 보존됩니다.</p>{% endif %}
+    <label>기존 Quiz 회차 코드(선택)<input name="quiz_episode_code" value="{{ episode.quiz_episode_code if episode and episode.quiz_episode_code else '' }}" placeholder="예: R008"></label>
     <label class="inline"><input type="checkbox" name="is_published" {% if episode and episode.is_published %}checked{% endif %}> 공개</label>
     <button class="primary">저장</button>
   </form>
 </section>
+{% if episode_id %}
+<section class="stack" id="audioletter-blocks"><div class="admin-head"><h2>콘텐츠 블록</h2></div>
+  {% for block in display_blocks %}<div class="card row-card"><span><strong>{{ block.sort_order }} · {{ 'Audio' if block.block_type == 'audio' else 'Info' }} · {{ block.title or ('기존 메인 오디오' if not block.id else '제목 없음') }}</strong></span>
+    <span>{% if block.id %}<a href="{{ url_for('audioletters.admin_audioletter_block_edit', episode_id=episode_id, block_id=block.id) }}">수정</a>
+    <form method="post" class="inline-form" action="{{ url_for('audioletters.admin_audioletter_block_delete', episode_id=episode_id, block_id=block.id) }}" onsubmit="return confirm('이 블록을 삭제하시겠습니까?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-danger">삭제</button></form>
+    {% else %}<a href="#legacy-audio-fields">수정</a>
+    <form method="post" class="inline-form" action="{{ url_for('audioletters.admin_audioletter_legacy_block_delete', episode_id=episode_id) }}" onsubmit="return confirm('기존 메인 오디오와 스크립트를 삭제하시겠습니까?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-danger">삭제</button></form>{% endif %}</span></div>
+  {% else %}<p>등록된 블록이 없습니다.</p>{% endfor %}
+  <p><a class="primary button-link" href="{{ url_for('audioletters.admin_audioletter_block_new', episode_id=episode_id) }}">+ 블록 추가</a></p>
+</section>
+{% endif %}
 {% endblock %}
