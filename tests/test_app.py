@@ -10,7 +10,7 @@ from unittest.mock import patch
 from botocore.exceptions import ClientError
 from urllib.parse import parse_qs, urlsplit
 
-from audioletters import accessible_audioletter_episode
+from audioletters import accessible_audioletter_episode, episode_blocks
 from audio_storage import AudioStorageUnavailable, audio_client
 from app import create_app, create_default_feedback, seed_demo
 from db import connect, transaction, utcnow
@@ -3939,6 +3939,186 @@ class QuizAppTest(unittest.TestCase):
         config["AUDIOLETTER_BUCKET_ADDRESSING_STYLE"] = "invalid"
         with self.assertRaises(AudioStorageUnavailable):
             audio_client(config)
+
+    def test_audioletter_blocks_migrate_additively_and_preserve_legacy_episode(self):
+        legacy_path = str(Path(self.temp.name) / "legacy-blocks.db")
+        conn = sqlite3.connect(legacy_path)
+        conn.executescript("""
+            CREATE TABLE episodes(id INTEGER PRIMARY KEY,code TEXT UNIQUE);
+            CREATE TABLE audioletter_episodes (
+                id INTEGER PRIMARY KEY,sequence INTEGER UNIQUE,season INTEGER,
+                season_episode INTEGER,title TEXT,audio_storage_key TEXT,
+                transcript TEXT,is_published INTEGER,created_at TEXT,updated_at TEXT);
+            INSERT INTO audioletter_episodes VALUES
+                (7,7,1,7,'기존 회차','audioletters/season1/007.mp3',
+                 '기존 원문',1,'2026-09-01','2026-09-01');
+        """)
+        conn.commit()
+        conn.close()
+        from db import init_db
+        init_db(legacy_path)
+        init_db(legacy_path)
+        conn = connect(legacy_path)
+        legacy = conn.execute("SELECT * FROM audioletter_episodes WHERE id=7").fetchone()
+        self.assertEqual(legacy["transcript"], "기존 원문")
+        self.assertIsNone(legacy["quiz_episode_code"])
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM audioletter_blocks").fetchone()[0], 0)
+        self.assertEqual(episode_blocks(conn, legacy)[0]["audio_storage_key"],
+                         "audioletters/season1/007.mp3")
+        conn.close()
+
+    def test_audioletter_admin_blocks_order_promotion_and_safe_output(self):
+        subscriber_id, episodes = self.audioletter_fixture()
+        episode_id = episodes[7]
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+            state["is_admin"] = True
+            state["csrf_token"] = "blocks-csrf"
+        self.assertIn("회차 7", self.client.get(f"/audioletters/{episode_id}").get_data(as_text=True))
+        new_url = f"/admin/audioletters/{episode_id}/blocks/new"
+        self.assertEqual(self.client.get(new_url).status_code, 200)
+        info_data = {"csrf_token": "blocks-csrf", "sort_order": "2", "block_type": "info",
+                     "title": "잠깐 쉬어가기", "body": "정보 첫 줄\n둘째 줄<script>alert(2)</script>"}
+        self.assertEqual(self.client.post(new_url, data=info_data).status_code, 302)
+        audio_data = {"csrf_token": "blocks-csrf", "sort_order": "3", "block_type": "audio",
+                      "title": "추가 오디오", "audio_storage_key": "audioletters/season1/007-extra.mp3",
+                      "transcript": "추가 원고\n\n둘째 문단"}
+        self.assertEqual(self.client.post(new_url, data=audio_data).status_code, 302)
+        conn = connect(self.db_path)
+        episode = conn.execute("SELECT * FROM audioletter_episodes WHERE id=?", (episode_id,)).fetchone()
+        blocks = episode_blocks(conn, episode)
+        self.assertEqual([(b["sort_order"], b["block_type"]) for b in blocks],
+                         [(1, "audio"), (2, "info"), (3, "audio")])
+        self.assertEqual(blocks[0]["transcript"], episode["transcript"])
+        self.assertEqual(episode["audio_storage_key"], "audioletters/season1/007.mp3")
+        extra_id = blocks[2]["id"]
+        conn.close()
+        page = self.client.get(f"/audioletters/{episode_id}").get_data(as_text=True)
+        self.assertLess(page.index("메인 오디오"), page.index("잠깐 쉬어가기"))
+        self.assertLess(page.index("잠깐 쉬어가기"), page.index("추가 오디오"))
+        self.assertIn("정보 첫 줄\n둘째 줄", page)
+        self.assertIn("&lt;script&gt;alert(2)&lt;/script&gt;", page)
+        self.assertNotIn("<script>alert(2)</script>", page)
+        self.assertIn("추가 원고\n\n둘째 문단", page)
+        self.assertEqual(page.count('controlsList="nodownload"'), 2)
+        self.assertEqual(page.count("이 콘텐츠는 교육 및 정보 제공을 위한 자료"), 1)
+        self.assertIn(f"/audioletters/{episode_id}/blocks/{extra_id}/audio", page)
+        self.assertEqual(self.client.post(new_url, data=info_data).status_code, 200)
+        with transaction(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM audioletter_blocks WHERE episode_id=?",
+                                          (episode_id,)).fetchone()[0], 3)
+        # Admin edits legacy metadata without overriding the canonical block body.
+        edit_page = self.client.get(f"/admin/audioletters/{episode_id}/edit")
+        self.assertIn("블록 추가", edit_page.get_data(as_text=True))
+        self.assertIn("블록에서 수정", edit_page.get_data(as_text=True))
+        edited = self.client.post(
+            f"/admin/audioletters/{episode_id}/blocks/{extra_id}/edit",
+            data=dict(audio_data, title="편집된 추가 오디오"),
+        )
+        self.assertEqual(edited.status_code, 302)
+        self.assertIn("편집된 추가 오디오", self.client.get(f"/audioletters/{episode_id}").get_data(as_text=True))
+        self.assertEqual(self.client.post(new_url, data=dict(audio_data,
+                             sort_order="4", audio_storage_key="https://public.invalid/a.mp3")).status_code, 200)
+
+    def test_audioletter_block_audio_entitlement_and_each_range(self):
+        subscriber_id, episodes = self.audioletter_fixture()
+        episode_id = episodes[7]
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+            state["is_admin"] = True
+            state["csrf_token"] = "block-audio-csrf"
+        with transaction(self.db_path) as conn:
+            from audioletters import _promote_legacy_block
+            episode = conn.execute("SELECT * FROM audioletter_episodes WHERE id=?", (episode_id,)).fetchone()
+            _promote_legacy_block(conn, episode)
+            extra_id = conn.execute(
+                """INSERT INTO audioletter_blocks
+                   (episode_id,sort_order,block_type,title,audio_storage_key,created_at,updated_at)
+                   VALUES(?,2,'audio','추가','audioletters/season1/007-extra.mp3',?,?)""",
+                (episode_id, utcnow(), utcnow()),
+            ).lastrowid
+            main_id = conn.execute("SELECT id FROM audioletter_blocks WHERE episode_id=? AND sort_order=1",
+                                   (episode_id,)).fetchone()[0]
+
+        class FakeBody:
+            def iter_chunks(self, chunk_size):
+                yield b"abc"
+            def close(self):
+                pass
+
+        keys = []
+        def fake_fetch(config, key, byte_range):
+            keys.append((key, byte_range))
+            return {"Body": FakeBody(), "ContentLength": 3,
+                    "ContentRange": "bytes 0-2/10",
+                    "ResponseMetadata": {"HTTPStatusCode": 206}}
+
+        with patch("audioletters.fetch_audio", side_effect=fake_fetch):
+            for block_id in (main_id, extra_id):
+                res = self.client.get(f"/audioletters/{episode_id}/blocks/{block_id}/audio",
+                                      headers={"Range": "bytes=0-2"})
+                self.assertEqual(res.status_code, 206)
+                self.assertEqual(res.get_data(), b"abc")
+                self.assertEqual(res.headers["Content-Range"], "bytes 0-2/10")
+            self.assertEqual(self.client.get(f"/audioletters/{episode_id}/audio",
+                             headers={"Range": "bytes=0-2"}).status_code, 206)
+        self.assertEqual(keys[0][0], "audioletters/season1/007.mp3")
+        self.assertEqual(keys[1][0], "audioletters/season1/007-extra.mp3")
+        self.assertEqual(keys[2][0], "audioletters/season1/007.mp3")
+        with patch("audioletters.fetch_audio", side_effect=ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "sensitive object name"}}, "GetObject"
+        )):
+            missing = self.client.get(f"/audioletters/{episode_id}/blocks/{extra_id}/audio")
+            self.assertEqual(missing.status_code, 404)
+            self.assertNotIn(b"sensitive object name", missing.get_data())
+        with patch("audioletters.fetch_audio") as fetch:
+            self.assertEqual(self.client.get(f"/audioletters/{episode_id}/blocks/999999/audio").status_code, 404)
+            fetch.assert_not_called()
+        for column, value, expected in (("accessible_through", 6, 404),
+                                        ("is_paid_subscriber", 0, 403),
+                                        ("is_active", 0, 302)):
+            with transaction(self.db_path) as conn:
+                conn.execute(f"UPDATE subscribers SET {column}=? WHERE id=?", (value, subscriber_id))
+            with patch("audioletters.fetch_audio") as fetch:
+                self.assertEqual(self.client.get(f"/audioletters/{episode_id}/blocks/{extra_id}/audio").status_code,
+                                 expected)
+                fetch.assert_not_called()
+            with transaction(self.db_path) as conn:
+                conn.execute(f"UPDATE subscribers SET {column}=? WHERE id=?", (7 if column == "accessible_through" else 1, subscriber_id))
+            with self.client.session_transaction() as state:
+                state["subscriber_id"] = subscriber_id
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE audioletter_episodes SET is_published=0 WHERE id=?", (episode_id,))
+        with patch("audioletters.fetch_audio") as fetch:
+            self.assertEqual(self.client.get(f"/audioletters/{episode_id}/blocks/{extra_id}/audio").status_code,404)
+            fetch.assert_not_called()
+
+    def test_audioletter_explicit_quiz_link_uses_existing_participation_feedback(self):
+        subscriber_id, episodes = self.audioletter_fixture()
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+            state["is_admin"] = True
+            state["csrf_token"] = "quiz-link-csrf"
+        conn = connect(self.db_path)
+        quiz = conn.execute("SELECT id FROM episodes WHERE code='R041'").fetchone()
+        conn.close()
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE audioletter_episodes SET quiz_episode_code='R041' WHERE id=?",
+                         (episodes[7],))
+            conn.execute("UPDATE episodes SET is_published=1 WHERE id=?", (quiz["id"],))
+        url = f"/audioletters/{episodes[7]}"
+        before = self.client.get(url).get_data(as_text=True)
+        self.assertIn("/quiz?episode=R041", before)
+        self.assertNotIn("/episode/R041/feedback", before)
+        with transaction(self.db_path) as conn:
+            conn.execute("""INSERT INTO participation
+                         (subscriber_id,episode_id,first_completed_at,source)
+                         VALUES(?,?,?,'app')""", (subscriber_id, quiz["id"], utcnow()))
+        after = self.client.get(url).get_data(as_text=True)
+        self.assertIn("/episode/R041/feedback", after)
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE episodes SET is_published=0 WHERE id=?", (quiz["id"],))
+        self.assertNotIn("/quiz?episode=R041", self.client.get(url).get_data(as_text=True))
 
 
 if __name__ == "__main__":
