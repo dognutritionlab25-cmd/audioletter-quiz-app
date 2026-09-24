@@ -3819,7 +3819,7 @@ class QuizAppTest(unittest.TestCase):
         self.assertEqual(detail.status_code, 200)
         self.assertIn(f'/audioletters/{episodes[7]}/audio', content)
         self.assertIn("<details>", content)
-        self.assertIn("첫 문단\n\n둘째 줄", content)
+        self.assertIn("<p>첫 문단</p>\n<p>둘째 줄", content)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", content)
         self.assertNotIn("<script>alert(1)</script>", content)
         self.assertIn("white-space:pre-wrap", (ROOT / "static/style.css").read_text())
@@ -3975,12 +3975,20 @@ class QuizAppTest(unittest.TestCase):
             state["is_admin"] = True
             state["csrf_token"] = "blocks-csrf"
         self.assertIn("회차 7", self.client.get(f"/audioletters/{episode_id}").get_data(as_text=True))
+        legacy_edit = self.client.get(f"/admin/audioletters/{episode_id}/edit").get_data(as_text=True)
+        self.assertIn("기존 메인 오디오", legacy_edit)
+        self.assertIn("+ 블록 추가", legacy_edit)
+        self.assertIn("/blocks/legacy/delete", legacy_edit)
         new_url = f"/admin/audioletters/{episode_id}/blocks/new"
         self.assertEqual(self.client.get(new_url).status_code, 200)
-        info_data = {"csrf_token": "blocks-csrf", "sort_order": "2", "block_type": "info",
+        first_audio = {"csrf_token": "blocks-csrf", "sort_order": "2", "block_type": "audio",
+                       "title": "첫 번째 추가 오디오", "audio_storage_key": "audioletters/season1/007-next.mp3",
+                       "transcript": "첫 번째 추가 스크립트"}
+        self.assertEqual(self.client.post(new_url, data=first_audio).status_code, 302)
+        info_data = {"csrf_token": "blocks-csrf", "sort_order": "3", "block_type": "info",
                      "title": "잠깐 쉬어가기", "body": "정보 첫 줄\n둘째 줄<script>alert(2)</script>"}
         self.assertEqual(self.client.post(new_url, data=info_data).status_code, 302)
-        audio_data = {"csrf_token": "blocks-csrf", "sort_order": "3", "block_type": "audio",
+        audio_data = {"csrf_token": "blocks-csrf", "sort_order": "4", "block_type": "audio",
                       "title": "추가 오디오", "audio_storage_key": "audioletters/season1/007-extra.mp3",
                       "transcript": "추가 원고\n\n둘째 문단"}
         self.assertEqual(self.client.post(new_url, data=audio_data).status_code, 302)
@@ -3988,25 +3996,27 @@ class QuizAppTest(unittest.TestCase):
         episode = conn.execute("SELECT * FROM audioletter_episodes WHERE id=?", (episode_id,)).fetchone()
         blocks = episode_blocks(conn, episode)
         self.assertEqual([(b["sort_order"], b["block_type"]) for b in blocks],
-                         [(1, "audio"), (2, "info"), (3, "audio")])
+                         [(1, "audio"), (2, "audio"), (3, "info"), (4, "audio")])
         self.assertEqual(blocks[0]["transcript"], episode["transcript"])
         self.assertEqual(episode["audio_storage_key"], "audioletters/season1/007.mp3")
-        extra_id = blocks[2]["id"]
+        extra_id = blocks[3]["id"]
         conn.close()
         page = self.client.get(f"/audioletters/{episode_id}").get_data(as_text=True)
-        self.assertLess(page.index("메인 오디오"), page.index("잠깐 쉬어가기"))
-        self.assertLess(page.index("잠깐 쉬어가기"), page.index("추가 오디오"))
-        self.assertIn("정보 첫 줄\n둘째 줄", page)
+        self.assertLess(page.index("메인 오디오"), page.index("첫 번째 추가 오디오"))
+        self.assertLess(page.index("첫 번째 추가 오디오"), page.index("잠깐 쉬어가기"))
+        self.assertLess(page.index("잠깐 쉬어가기"), page.index("<h2>추가 오디오</h2>"))
+        self.assertIn("정보 첫 줄<br>\n둘째 줄", page)
         self.assertIn("&lt;script&gt;alert(2)&lt;/script&gt;", page)
         self.assertNotIn("<script>alert(2)</script>", page)
-        self.assertIn("추가 원고\n\n둘째 문단", page)
-        self.assertEqual(page.count('controlsList="nodownload"'), 2)
+        self.assertIn("<p>추가 원고</p>\n<p>둘째 문단</p>", page)
+        self.assertEqual(page.count('controlsList="nodownload"'), 3)
+        self.assertEqual(page.count("첫 문단"), 1)
         self.assertEqual(page.count("이 콘텐츠는 교육 및 정보 제공을 위한 자료"), 1)
         self.assertIn(f"/audioletters/{episode_id}/blocks/{extra_id}/audio", page)
         self.assertEqual(self.client.post(new_url, data=info_data).status_code, 200)
         with transaction(self.db_path) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM audioletter_blocks WHERE episode_id=?",
-                                          (episode_id,)).fetchone()[0], 3)
+                                          (episode_id,)).fetchone()[0], 4)
         # Admin edits legacy metadata without overriding the canonical block body.
         edit_page = self.client.get(f"/admin/audioletters/{episode_id}/edit")
         self.assertIn("블록 추가", edit_page.get_data(as_text=True))
@@ -4018,7 +4028,60 @@ class QuizAppTest(unittest.TestCase):
         self.assertEqual(edited.status_code, 302)
         self.assertIn("편집된 추가 오디오", self.client.get(f"/audioletters/{episode_id}").get_data(as_text=True))
         self.assertEqual(self.client.post(new_url, data=dict(audio_data,
-                             sort_order="4", audio_storage_key="https://public.invalid/a.mp3")).status_code, 200)
+                             sort_order="5", audio_storage_key="https://public.invalid/a.mp3")).status_code, 200)
+
+    def test_audioletter_markdown_rendering_legacy_audio_and_info_preserves_source(self):
+        subscriber_id, episodes = self.audioletter_fixture()
+        episode_id = episodes[7]
+        source = "#### 저는 반려견 영양에 대해 이야기합니다.\n\n보호자는 **하루 종일 관찰하고 있습니다.**\n다음 줄 <script>alert(9)</script>"
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE audioletter_episodes SET transcript=? WHERE id=?", (source, episode_id))
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+            state["is_admin"] = True
+            state["csrf_token"] = "markdown-csrf"
+        url = f"/admin/audioletters/{episode_id}/blocks/new"
+        for order, kind, field in ((2, "info", "body"), (3, "audio", "transcript")):
+            values = {"csrf_token": "markdown-csrf", "sort_order": str(order), "block_type": kind,
+                      "title": f"{kind} 내용", field: source}
+            if kind == "audio":
+                values["audio_storage_key"] = "audioletters/season1/007-extra.mp3"
+            self.assertEqual(self.client.post(url, data=values).status_code, 302)
+        content = self.client.get(f"/audioletters/{episode_id}").get_data(as_text=True)
+        self.assertEqual(content.count("저는 반려견 영양에 대해 이야기합니다."), 3)
+        self.assertIn("<h4>저는 반려견 영양에 대해 이야기합니다.</h4>", content)
+        self.assertIn("보호자는 <strong>하루 종일 관찰하고 있습니다.</strong>", content)
+        self.assertIn("<br>\n다음 줄", content)
+        self.assertNotIn("####", content)
+        self.assertNotIn("**하루 종일", content)
+        self.assertNotIn("<script>alert(9)</script>", content)
+        self.assertIn("&lt;script&gt;alert(9)&lt;/script&gt;", content)
+        with transaction(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT transcript FROM audioletter_episodes WHERE id=?",
+                                          (episode_id,)).fetchone()[0], source)
+            rows = conn.execute("SELECT block_type,body,transcript FROM audioletter_blocks WHERE episode_id=? ORDER BY sort_order",
+                                (episode_id,)).fetchall()
+            self.assertEqual(len(rows), 3)
+            self.assertEqual(rows[0]["transcript"], source)
+            self.assertEqual(rows[1]["body"], source)
+            self.assertEqual(rows[2]["transcript"], source)
+
+    def test_audioletter_legacy_block_delete_requires_admin_csrf(self):
+        subscriber_id, episodes = self.audioletter_fixture()
+        episode_id = episodes[7]
+        url = f"/admin/audioletters/{episode_id}/blocks/legacy/delete"
+        self.assertEqual(self.client.post(url).status_code, 400)
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+            state["is_admin"] = True
+            state["csrf_token"] = "legacy-delete-csrf"
+        self.assertEqual(self.client.post(url).status_code, 400)
+        self.assertEqual(self.client.post(url, data={"csrf_token": "legacy-delete-csrf"}).status_code, 302)
+        conn = connect(self.db_path)
+        episode = conn.execute("SELECT * FROM audioletter_episodes WHERE id=?", (episode_id,)).fetchone()
+        self.assertEqual(episode_blocks(conn, episode), [])
+        self.assertIsNone(episode["audio_storage_key"])
+        conn.close()
 
     def test_audioletter_block_audio_entitlement_and_each_range(self):
         subscriber_id, episodes = self.audioletter_fixture()
