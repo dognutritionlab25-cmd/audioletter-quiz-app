@@ -110,6 +110,7 @@ python app.py
 - `resources`: 자료 제목·본문·카테고리·외부 링크·공개 상태와 작성/수정 시각
 - `subscribers.is_paid_subscriber`: Google Sheet/Make가 판단한 현재 유료 구독 상태. `is_active`와 별도
 - `subscribers.accessible_through`: 해당 구독자에게 시스템상 공개된 최신 오디오레터 내부 연속 회차. 기존 구독자는 `NULL`로 유지하고 실제 범위 동기화 시에만 설정
+- `audioletter_episodes`: Quiz `episodes`와 분리된 오디오레터 콘텐츠. 고유 내부 `sequence`, 시즌·시즌 내 표시 회차, 제목, 향후 비공개 오디오 저장 키, 원문 스크립트, 공개 상태를 저장
 - `community_posts`, `community_comments`, `community_likes`: 게시글·댓글·게시글별 subscriber 1회 좋아요
 - `portal_settings`: 결제 안내 공개 여부와 이용약관·개인정보처리방침 시행일(단일 설정 행)
 - `subscription_registrations`: 결제 후 입력한 유료 구독 등록 신청의 메타데이터·이메일 HMAC·처리 상태
@@ -181,7 +182,15 @@ Authorization: Bearer <SUBSCRIPTION_REGISTRATION_API_KEY>
 
 유료 구독 종료는 `active`를 `false`로 만드는 작업이 아닙니다. `is_active`는 계정 사용 가능 여부로 계속 분리하여 유지합니다.
 
-오디오레터 접근 범위는 선택 입력 `"accessible_through": 6`처럼 같은 sync API에 전달합니다. 신규 유료 등록은 Sheet의 초기 L=6을 전달할 수 있고, 향후 7회차 전용 Make의 Sheet #5 및 Master의 Sheet #20 업데이트가 성공한 뒤 해당 회차 값을 전달할 예정입니다. 이 필드가 없으면 기존 범위를 그대로 두고, 전달되면 0 이상의 정수만 받아 기존 값보다 큰 경우에만 저장합니다. `is_paid_subscriber=false` 또는 재구독 sync도 범위를 지우지 않습니다. 현재 오디오레터 콘텐츠 및 접근 경로는 아직 구현되지 않았습니다.
+오디오레터 접근 범위는 선택 입력 `"accessible_through": 6`처럼 같은 sync API에 전달합니다. 신규 유료 등록은 Sheet의 초기 L=6을 전달할 수 있고, 향후 7회차 전용 Make의 Sheet #5 및 Master의 Sheet #20 업데이트가 성공한 뒤 해당 회차 값을 전달할 예정입니다. 이 필드가 없으면 기존 범위를 그대로 두고, 전달되면 0 이상의 정수만 받아 기존 값보다 큰 경우에만 저장합니다. `is_paid_subscriber=false` 또는 재구독 sync도 범위를 지우지 않습니다. 현재 오디오레터 사용자 접근 경로는 아직 구현되지 않았습니다.
+
+### 오디오레터 콘텐츠 기반
+
+`audioletter_episodes`는 앱 시작 시 additive schema 초기화로 생성됩니다. Quiz용 `episodes` 및 Quiz 시즌/참여 관계와 연결되지 않습니다. DB의 `id`는 영구 식별자이고 `sequence`는 시즌을 넘어 증가하는 접근권한 비교값입니다. `season`과 `season_episode`는 고객 표시용입니다. `sequence`와 `(season, season_episode)`는 각각 중복을 허용하지 않습니다.
+
+관리자는 `/admin/audioletters`에서 회차를 확인하고 새로 등록하거나 수정할 수 있습니다. 공개 여부도 편집 화면에서 변경합니다. `audio_storage_key`는 향후 Private Bucket 연결을 위한 문자열만 저장하며 업로드나 재생 경로는 없습니다. `transcript`는 HTML로 변환하지 않고 SQLite `TEXT`에 줄바꿈을 보존하여 저장합니다.
+
+향후 사용자용 콘텐츠 경로에서는 `audioletters.accessible_audioletter_episode()`로 구독자와 공개 회차를 조회해야 합니다. 이 함수는 기존 `services.can_access_paid_audioletter()`를 재사용하여 `is_active`, `is_paid_subscriber`, `is_published`, `sequence <= accessible_through`를 모두 확인한 후에만 콘텐츠 행을 돌려줍니다. 이번 단계에는 사용자용 목록·스크립트·오디오 endpoint를 추가하지 않았습니다. 현재 Quiz의 `episodes`는 이 조건을 사용하지 않습니다.
 
 ## 인증과 Quiz core의 분리
 

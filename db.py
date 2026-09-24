@@ -39,6 +39,20 @@ CREATE TABLE IF NOT EXISTS episodes (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS audioletter_episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sequence INTEGER NOT NULL UNIQUE CHECK(sequence >= 1),
+    season INTEGER NOT NULL CHECK(season >= 1),
+    season_episode INTEGER NOT NULL CHECK(season_episode >= 1),
+    title TEXT NOT NULL,
+    audio_storage_key TEXT,
+    transcript TEXT NOT NULL DEFAULT '',
+    is_published INTEGER NOT NULL DEFAULT 0 CHECK(is_published IN (0,1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(season, season_episode)
+);
+
 CREATE TABLE IF NOT EXISTS questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
@@ -223,6 +237,8 @@ CREATE TABLE IF NOT EXISTS dog_profiles (
 
 CREATE INDEX IF NOT EXISTS idx_questions_episode ON questions(episode_id, display_order);
 CREATE INDEX IF NOT EXISTS idx_attempts_subscriber_episode ON quiz_attempts(subscriber_id, episode_id);
+CREATE INDEX IF NOT EXISTS idx_audioletter_episodes_published_sequence
+    ON audioletter_episodes(is_published, sequence);
 CREATE INDEX IF NOT EXISTS idx_participation_subscriber ON participation(subscriber_id);
 CREATE INDEX IF NOT EXISTS idx_legacy_participation_subscriber ON legacy_participation(subscriber_id);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_expiry ON magic_link_tokens(expires_at, used_at);
