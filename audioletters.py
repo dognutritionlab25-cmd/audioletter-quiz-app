@@ -380,6 +380,20 @@ def admin_audioletter_block_delete(episode_id, block_id):
     return redirect(url_for("audioletters.admin_audioletter_edit", episode_id=episode_id))
 
 
+@audioletters_bp.post("/admin/audioletters/<int:episode_id>/blocks/legacy/delete")
+@admin_required
+def admin_audioletter_legacy_block_delete(episode_id):
+    _admin_episode(episode_id)
+    with transaction(current_app.config["DB_PATH"]) as conn:
+        if conn.execute("SELECT 1 FROM audioletter_blocks WHERE episode_id=?", (episode_id,)).fetchone():
+            abort(404)
+        conn.execute(
+            "UPDATE audioletter_episodes SET audio_storage_key=NULL,transcript='',updated_at=? WHERE id=?",
+            (utcnow(), episode_id),
+        )
+    return redirect(url_for("audioletters.admin_audioletter_edit", episode_id=episode_id))
+
+
 @audioletters_bp.route("/admin/audioletters/new", methods=["GET", "POST"])
 @admin_required
 def admin_audioletter_new():
@@ -459,5 +473,8 @@ def admin_audioletter_edit(episode_id):
                 return redirect(url_for("audioletters.admin_audioletter_edit", episode_id=episode_id))
         for error in errors:
             flash(error, "error")
+    conn = connect(current_app.config["DB_PATH"])
+    display_blocks = episode_blocks(conn, stored_episode)
+    conn.close()
     return render_template("admin_audioletter_form.html", episode=episode, episode_id=episode_id,
-                           blocks=blocks)
+                           blocks=blocks, display_blocks=display_blocks)
