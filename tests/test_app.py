@@ -3846,6 +3846,18 @@ class QuizAppTest(unittest.TestCase):
                     f"/audioletters/{episodes[7]}/audio"):
             self.assertEqual(self.client.get(url).status_code, 302)
 
+    def test_audioletter_player_hides_browser_download_ui(self):
+        subscriber_id, episodes = self.audioletter_fixture()
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+        detail = self.client.get(f"/audioletters/{episodes[7]}")
+        self.assertEqual(detail.status_code, 200)
+        html = detail.get_data(as_text=True)
+        self.assertIn('<audio controls controlsList="nodownload"', html)
+        self.assertIn('oncontextmenu="return false;"', html)
+        self.assertIn(f'/audioletters/{episodes[7]}/audio', html)
+        self.assertIn('<details>', html)
+
     def test_audioletter_stream_range_errors_and_revocation(self):
         subscriber_id, episodes = self.audioletter_fixture()
         with self.client.session_transaction() as state:
