@@ -7,9 +7,11 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+from botocore.exceptions import ClientError
 from urllib.parse import parse_qs, urlsplit
 
 from audioletters import accessible_audioletter_episode
+from audio_storage import AudioStorageUnavailable, audio_client
 from app import create_app, create_default_feedback, seed_demo
 from db import connect, transaction, utcnow
 from importers import import_google_form_payload, migrate_anonymous_feedback, migrate_historical_responses
@@ -3770,6 +3772,161 @@ class QuizAppTest(unittest.TestCase):
             conn.close()
             with transaction(self.db_path) as conn:
                 conn.execute(f"UPDATE subscribers SET {column}=1 WHERE id=?", (subscriber_id,))
+
+    def audioletter_fixture(self):
+        subscriber_id = self.create_real_subscriber("audio-playback@example.invalid")
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                "UPDATE subscribers SET is_paid_subscriber=1,accessible_through=7 WHERE id=?",
+                (subscriber_id,),
+            )
+            episodes = {}
+            for sequence, published, key in (
+                (7, 1, "audioletters/season1/007.mp3"),
+                (8, 1, "audioletters/season1/008.mp3"),
+                (6, 0, "audioletters/season1/006.mp3"),
+                (5, 1, None),
+            ):
+                episodes[sequence] = conn.execute(
+                    """INSERT INTO audioletter_episodes
+                       (sequence,season,season_episode,title,audio_storage_key,
+                        transcript,is_published,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (sequence, 1, sequence, f"회차 {sequence}", key,
+                     "첫 문단\n\n둘째 줄<script>alert(1)</script>", published,
+                     utcnow(), utcnow()),
+                ).lastrowid
+        return subscriber_id, episodes
+
+    def test_audioletter_user_list_detail_and_entitlement(self):
+        subscriber_id, episodes = self.audioletter_fixture()
+        self.assertEqual(self.client.get("/audioletters").status_code, 302)
+        self.assertEqual(self.client.get(f"/audioletters/{episodes[7]}").status_code, 302)
+        self.assertEqual(self.client.get(f"/audioletters/{episodes[7]}/audio").status_code, 302)
+
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+        listing = self.client.get("/audioletters")
+        html = listing.get_data(as_text=True)
+        self.assertEqual(listing.status_code, 200)
+        self.assertIn("회차 7", html)
+        self.assertIn("회차 5", html)
+        self.assertNotIn("회차 8", html)
+        self.assertNotIn("회차 6", html)
+        self.assertEqual(listing.headers["Cache-Control"], "private, no-store")
+        detail = self.client.get(f"/audioletters/{episodes[7]}")
+        content = detail.get_data(as_text=True)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(f'/audioletters/{episodes[7]}/audio', content)
+        self.assertIn("<details>", content)
+        self.assertIn("첫 문단\n\n둘째 줄", content)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", content)
+        self.assertNotIn("<script>alert(1)</script>", content)
+        self.assertIn("white-space:pre-wrap", (ROOT / "static/style.css").read_text())
+        self.assertNotIn("<audio", self.client.get(f"/audioletters/{episodes[5]}").get_data(as_text=True))
+        for sequence in (6, 8):
+            self.assertEqual(self.client.get(f"/audioletters/{episodes[sequence]}").status_code, 404)
+            with patch("audioletters.fetch_audio") as fetch:
+                self.assertEqual(self.client.get(f"/audioletters/{episodes[sequence]}/audio").status_code, 404)
+                fetch.assert_not_called()
+        with patch("audioletters.fetch_audio") as fetch:
+            self.assertEqual(self.client.get(f"/audioletters/{episodes[5]}/audio").status_code, 404)
+            fetch.assert_not_called()
+
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE subscribers SET is_paid_subscriber=0 WHERE id=?", (subscriber_id,))
+        self.assertEqual(self.client.get("/audioletters").status_code, 403)
+        self.assertEqual(self.client.get(f"/audioletters/{episodes[7]}").status_code, 403)
+        with patch("audioletters.fetch_audio") as fetch:
+            self.assertEqual(self.client.get(f"/audioletters/{episodes[7]}/audio").status_code, 403)
+            fetch.assert_not_called()
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE subscribers SET is_paid_subscriber=1,is_active=0 WHERE id=?", (subscriber_id,))
+        for url in ("/audioletters", f"/audioletters/{episodes[7]}",
+                    f"/audioletters/{episodes[7]}/audio"):
+            self.assertEqual(self.client.get(url).status_code, 302)
+
+    def test_audioletter_stream_range_errors_and_revocation(self):
+        subscriber_id, episodes = self.audioletter_fixture()
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+        url = f"/audioletters/{episodes[7]}/audio"
+
+        class FakeBody:
+            def __init__(self, data):
+                self.data = data
+                self.closed = False
+            def iter_chunks(self, chunk_size):
+                yield self.data
+            def close(self):
+                self.closed = True
+
+        def fake_fetch(config, key, byte_range):
+            self.assertEqual(key, "audioletters/season1/007.mp3")
+            payload = b"0123456789" if byte_range is None else b"456"
+            body = FakeBody(payload)
+            bodies.append(body)
+            value = {"Body": body, "ContentLength": len(payload),
+                     "ResponseMetadata": {"HTTPStatusCode": 200 if byte_range is None else 206}}
+            if byte_range is not None:
+                self.assertEqual(byte_range, "bytes=4-6")
+                value["ContentRange"] = "bytes 4-6/10"
+            return value
+
+        bodies = []
+        with patch("audioletters.fetch_audio", side_effect=fake_fetch):
+            whole = self.client.get(url)
+            self.assertEqual(whole.status_code, 200)
+            self.assertEqual(whole.get_data(), b"0123456789")
+            self.assertTrue(bodies[-1].closed)
+            part = self.client.get(url, headers={"Range": "bytes=4-6"})
+            self.assertEqual(part.status_code, 206)
+            self.assertEqual(part.get_data(), b"456")
+            self.assertEqual(part.headers["Content-Range"], "bytes 4-6/10")
+            self.assertEqual(part.headers["Accept-Ranges"], "bytes")
+            self.assertEqual(part.headers["Cache-Control"], "private, no-store")
+            self.assertEqual(part.headers["Content-Type"], "audio/mpeg")
+            self.assertTrue(bodies[-1].closed)
+        with patch("audioletters.fetch_audio") as fetch:
+            self.assertEqual(self.client.get(url, headers={"Range": "bytes=0-1,3-4"}).status_code, 416)
+            fetch.assert_not_called()
+        with patch("audioletters.fetch_audio", side_effect=ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "internal bucket key"}}, "GetObject"
+        )):
+            missing = self.client.get(url)
+            self.assertEqual(missing.status_code, 404)
+            self.assertNotIn(b"internal bucket key", missing.get_data())
+        with patch("audioletters.fetch_audio", side_effect=ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "private credential"}}, "GetObject"
+        )):
+            failed = self.client.get(url)
+            self.assertEqual(failed.status_code, 503)
+            self.assertNotIn(b"private credential", failed.get_data())
+        self.assertEqual(self.client.get(url).status_code, 503)  # No bucket variables configured.
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE subscribers SET is_paid_subscriber=0 WHERE id=?", (subscriber_id,))
+        with patch("audioletters.fetch_audio") as fetch:
+            self.assertEqual(self.client.get(url).status_code, 403)
+            fetch.assert_not_called()
+
+    def test_audioletter_bucket_client_uses_explicit_railway_variables(self):
+        with self.assertRaises(AudioStorageUnavailable):
+            audio_client(self.app.config)
+        config = dict(self.app.config,
+                      AUDIOLETTER_BUCKET_NAME="bucket-example",
+                      AUDIOLETTER_BUCKET_ENDPOINT="https://storage.example.invalid",
+                      AUDIOLETTER_BUCKET_ACCESS_KEY_ID="fixture-id",
+                      AUDIOLETTER_BUCKET_SECRET_ACCESS_KEY="fixture-secret",
+                      AUDIOLETTER_BUCKET_ADDRESSING_STYLE="path")
+        with patch("audio_storage.boto3.client") as make_client:
+            audio_client(config)
+            kwargs = make_client.call_args.kwargs
+            self.assertEqual(kwargs["endpoint_url"], "https://storage.example.invalid")
+            self.assertEqual(kwargs["aws_access_key_id"], "fixture-id")
+            self.assertEqual(kwargs["config"].s3["addressing_style"], "path")
+        config["AUDIOLETTER_BUCKET_ADDRESSING_STYLE"] = "invalid"
+        with self.assertRaises(AudioStorageUnavailable):
+            audio_client(config)
 
 
 if __name__ == "__main__":
