@@ -1,9 +1,14 @@
 {% extends 'base.html' %}
 {% block content %}
-<section class="hero">
+<section class="hero portal-hero">
   <p class="eyebrow">반려견을 읽다</p>
-  <h1>오디오레터 이해 테스트</h1>
-  <p>오디오레터에서 안내된 회차의<br>'이해 테스트' 링크를 눌러 참여해주세요.</p>
-  <p><small>이미 참여한 기록은 '나의 참여'에서 확인할 수 있습니다.</small></p>
+  <h1>반려견영양연구소 구독자 포털</h1>
+  <p>오디오레터를 듣고, 필요한 자료를 찾아보고,<br>이해 테스트와 의견 남기기에 참여할 수 있습니다.</p>
+</section>
+<section class="portal-home-links" aria-label="포털 바로가기">
+  <article class="card portal-home-card"><h2>오디오레터</h2><p>구독 중인 오디오레터를 듣습니다.</p><a href="{{ url_for('audioletters.audioletter_list') }}">오디오레터 보기 →</a></article>
+  <article class="card portal-home-card"><h2>자료실</h2><p>오디오레터와 함께 보는 추가 자료를 확인합니다.</p><a href="{{ url_for('resources.resource_list') }}">자료실 보기 →</a></article>
+  <article class="card portal-home-card"><h2>구독자 게시판</h2><p>공지와 구독자 전용 소식을 확인합니다.</p><a href="{{ url_for('community.post_list') }}">게시판 보기 →</a></article>
+  <article class="card portal-home-card"><h2>나의 참여</h2><p>이해 테스트와 참여 기록을 확인합니다.</p><a href="{{ url_for('my_history') }}">나의 참여 보기 →</a></article>
 </section>
 {% endblock %}

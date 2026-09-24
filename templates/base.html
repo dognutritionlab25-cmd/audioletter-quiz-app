@@ -21,22 +21,19 @@
     {% endfor %}
     {% block content %}{% endblock %}
   </main>
-  <footer class="site-footer">
-    {% if not request.path.startswith('/admin') %}
+  <footer class="site-footer {{ 'site-footer-home' if request.endpoint == 'index' else 'site-footer-minimal' }}">
+    {% if request.endpoint == 'index' %}
     <div class="footer-business">
-      <strong>반려견영양연구소</strong>
-      <div>대표 양연주 <span aria-hidden="true">|</span> 사업자등록번호 854-35-01432</div>
-      <div>통신판매업 신고번호 제2026-대전유성-0045호</div>
-      <div>대전광역시 유성구 어은로 57, 127동 1405호</div>
-      <div>고객문의 <a href="tel:01083651024">010-8365-1024</a> <span aria-hidden="true">|</span> <a href="mailto:info@dognutritionlab.com">info@dognutritionlab.com</a></div>
+      <div>반려견영양연구소 · 대표 양연주 · 사업자등록번호 854-35-01432 · 통신판매업 신고번호 제2026-대전유성-0045호</div>
+      <div>대전광역시 유성구 어은로 57, 127동 1405호 · <a href="tel:01083651024">010-8365-1024</a> · <a href="mailto:info@dognutritionlab.com">info@dognutritionlab.com</a></div>
     </div>
     {% endif %}
     <nav class="footer-links" aria-label="하단 안내">
       <a href="{{ url_for('public_pages.terms') }}">이용약관</a>
       <a href="{{ url_for('public_pages.privacy') }}">개인정보처리방침</a>
-      {% if not request.path.startswith('/admin') %}<a href="https://www.ftc.go.kr/www/selectBizCommList.do?key=254" target="_blank" rel="noopener noreferrer">사업자정보 확인</a>{% endif %}
+      {% if request.endpoint == 'index' %}<a href="https://www.ftc.go.kr/www/selectBizCommList.do?key=254" target="_blank" rel="noopener noreferrer">사업자정보 확인</a>{% endif %}
+      {% if request.endpoint == 'index' %}<small>© 2026 반려견영양연구소</small>{% endif %}
     </nav>
-    {% if not request.path.startswith('/admin') %}<small>© 2026 반려견영양연구소. All rights reserved.</small>{% endif %}
   </footer>
 </body>
 </html>
