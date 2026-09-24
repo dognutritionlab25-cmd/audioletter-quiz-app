@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+from audioletters import accessible_audioletter_episode
 from app import create_app, create_default_feedback, seed_demo
 from db import connect, transaction, utcnow
 from importers import import_google_form_payload, migrate_anonymous_feedback, migrate_historical_responses
@@ -3615,6 +3616,160 @@ class QuizAppTest(unittest.TestCase):
             base_url="https://portal.dognutritionlab.com"
         ) as state:
             self.assertEqual(state["subscriber_id"], subscriber_id)
+
+
+    def test_audioletter_table_is_additive_and_separate_from_quiz_episodes(self):
+        conn = connect(self.db_path)
+        quiz_before = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+        quiz_columns_before = [
+            row["name"] for row in conn.execute("PRAGMA table_info(episodes)")
+        ]
+        self.assertIn("audioletter_episodes", {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        })
+        conn.close()
+
+        legacy_db = str(Path(self.temp.name) / "audioletter-table-upgrade.db")
+        create_app({"TESTING": True, "DB_PATH": legacy_db, "SEED_DEMO_DATA": False})
+        create_app({"TESTING": True, "DB_PATH": legacy_db, "SEED_DEMO_DATA": False})
+        migrated = connect(legacy_db)
+        self.assertEqual(migrated.execute(
+            "SELECT COUNT(*) FROM audioletter_episodes"
+        ).fetchone()[0], 0)
+        migrated.close()
+
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO audioletter_episodes
+                   (sequence,season,season_episode,title,transcript,created_at,updated_at)
+                   VALUES(42,1,42,'마지막 시즌1 회차','원고',?,?)""",
+                (utcnow(), utcnow()),
+            )
+            conn.execute(
+                """INSERT INTO audioletter_episodes
+                   (sequence,season,season_episode,title,transcript,created_at,updated_at)
+                   VALUES(43,2,1,'첫 시즌2 회차','원고',?,?)""",
+                (utcnow(), utcnow()),
+            )
+        conn = connect(self.db_path)
+        episodes = conn.execute(
+            "SELECT id,sequence,season,season_episode,is_published "
+            "FROM audioletter_episodes ORDER BY sequence"
+        ).fetchall()
+        self.assertNotEqual(episodes[0]["id"], episodes[0]["sequence"])
+        self.assertEqual(
+            [(e["sequence"], e["season"], e["season_episode"]) for e in episodes],
+            [(42, 1, 42), (43, 2, 1)],
+        )
+        self.assertEqual([e["is_published"] for e in episodes], [0, 0])
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0], quiz_before)
+        self.assertEqual(
+            [row["name"] for row in conn.execute("PRAGMA table_info(episodes)")],
+            quiz_columns_before,
+        )
+        conn.close()
+
+        for sequence, season, season_episode in ((43, 3, 1), (44, 2, 1)):
+            with self.assertRaises(sqlite3.IntegrityError):
+                with transaction(self.db_path) as conn:
+                    conn.execute(
+                        """INSERT INTO audioletter_episodes
+                           (sequence,season,season_episode,title,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?)""",
+                        (sequence, season, season_episode, "중복", utcnow(), utcnow()),
+                    )
+
+    def test_audioletter_admin_create_edit_and_preserve_long_plain_transcript(self):
+        self.assertNotEqual(self.client.get("/admin/audioletters").status_code, 200)
+        with self.client.session_transaction() as state:
+            state["is_admin"] = True
+            state["csrf_token"] = "audioletter-admin-csrf"
+        transcript = ("첫 문단\n\n  들여쓴 줄\n" * 600) + "<script>alert(1)</script>"
+        data = {
+            "csrf_token": "audioletter-admin-csrf",
+            "sequence": "43", "season": "2", "season_episode": "1",
+            "title": "시즌2 첫 회차", "audio_storage_key": "season2/episode-01.mp3",
+            "transcript": transcript,
+        }
+        created = self.client.post("/admin/audioletters/new", data=data)
+        self.assertEqual(created.status_code, 302)
+        conn = connect(self.db_path)
+        episode = conn.execute(
+            "SELECT * FROM audioletter_episodes WHERE sequence=43"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(episode["season"], 2)
+        self.assertEqual(episode["season_episode"], 1)
+        self.assertEqual(episode["audio_storage_key"], "season2/episode-01.mp3")
+        self.assertEqual(episode["transcript"], transcript)
+        self.assertEqual(episode["is_published"], 0)
+        self.assertIn("시즌2 · 1회", self.client.get("/admin/audioletters").get_data(as_text=True))
+        edit_url = f"/admin/audioletters/{episode['id']}/edit"
+        edit_page = self.client.get(edit_url).get_data(as_text=True)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", edit_page)
+        self.assertNotIn("<script>alert(1)</script>", edit_page)
+
+        changed = self.client.post(
+            edit_url, data=dict(data, title="수정한 회차", is_published="on")
+        )
+        self.assertEqual(changed.status_code, 302)
+        conn = connect(self.db_path)
+        updated = conn.execute(
+            "SELECT id,title,transcript,is_published FROM audioletter_episodes WHERE sequence=43"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(updated["id"], episode["id"])
+        self.assertEqual(updated["title"], "수정한 회차")
+        self.assertEqual(updated["transcript"], transcript)
+        self.assertEqual(updated["is_published"], 1)
+
+        duplicate = self.client.post(
+            "/admin/audioletters/new", data=dict(data, season_episode="2")
+        )
+        self.assertEqual(duplicate.status_code, 200)
+        conn = connect(self.db_path)
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM audioletter_episodes WHERE sequence=43"
+        ).fetchone()[0], 1)
+        conn.close()
+
+    def test_audioletter_content_lookup_requires_published_paid_active_and_range(self):
+        subscriber_id = self.create_real_subscriber("audio-access@example.invalid")
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                "UPDATE subscribers SET is_paid_subscriber=1,accessible_through=43 WHERE id=?",
+                (subscriber_id,),
+            )
+            episode_ids = []
+            for sequence, published in ((42, 1), (43, 1), (44, 1), (41, 0)):
+                episode_ids.append(conn.execute(
+                    """INSERT INTO audioletter_episodes
+                       (sequence,season,season_episode,title,transcript,is_published,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (sequence, 1 if sequence <= 42 else 2,
+                     sequence if sequence <= 42 else sequence - 42,
+                     "테스트 회차", "보호할 원고", published, utcnow(), utcnow()),
+                ).lastrowid)
+
+        conn = connect(self.db_path)
+        self.assertIsNotNone(accessible_audioletter_episode(conn, subscriber_id, episode_ids[0]))
+        self.assertIsNotNone(accessible_audioletter_episode(conn, subscriber_id, episode_ids[1]))
+        self.assertIsNone(accessible_audioletter_episode(conn, subscriber_id, episode_ids[2]))
+        self.assertIsNone(accessible_audioletter_episode(conn, subscriber_id, episode_ids[3]))
+        self.assertIsNone(accessible_audioletter_episode(conn, subscriber_id, 99999))
+        self.assertIsNone(accessible_audioletter_episode(conn, 99999, episode_ids[1]))
+        conn.close()
+
+        for column in ("is_paid_subscriber", "is_active"):
+            with transaction(self.db_path) as conn:
+                conn.execute(f"UPDATE subscribers SET {column}=0 WHERE id=?", (subscriber_id,))
+            conn = connect(self.db_path)
+            self.assertIsNone(accessible_audioletter_episode(conn, subscriber_id, episode_ids[1]))
+            conn.close()
+            with transaction(self.db_path) as conn:
+                conn.execute(f"UPDATE subscribers SET {column}=1 WHERE id=?", (subscriber_id,))
 
 
 if __name__ == "__main__":
