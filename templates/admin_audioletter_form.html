@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block title %}{{ '오디오레터 수정' if episode_id else '새 오디오레터 회차' }} · 관리자{% endblock %}
+{% block content %}
+<div class="admin-head">
+  <h1>{{ '오디오레터 수정' if episode_id else '새 오디오레터 회차' }}</h1>
+  <a class="secondary button-link" href="{{ url_for('audioletters.admin_audioletter_list') }}">목록으로</a>
+</div>
+<section class="card">
+  <form method="post" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>내부 연속 회차<input type="number" name="sequence" min="1" required value="{{ episode.sequence if episode and episode.sequence is not none else '' }}" placeholder="예: 43"></label>
+    <label>시즌<input type="number" name="season" min="1" required value="{{ episode.season if episode and episode.season is not none else '' }}" placeholder="예: 2"></label>
+    <label>시즌 내 회차<input type="number" name="season_episode" min="1" required value="{{ episode.season_episode if episode and episode.season_episode is not none else '' }}" placeholder="예: 1"></label>
+    <label class="wide">제목<input name="title" required maxlength="200" value="{{ episode.title if episode else '' }}"></label>
+    <label class="wide">오디오 저장 키<input name="audio_storage_key" value="{{ episode.audio_storage_key if episode and episode.audio_storage_key else '' }}" placeholder="향후 비공개 저장소의 객체 키"></label>
+    <label class="wide">전체 스크립트<textarea name="transcript" rows="18">{{ episode.transcript if episode else '' }}</textarea></label>
+    <label class="inline"><input type="checkbox" name="is_published" {% if episode and episode.is_published %}checked{% endif %}> 공개</label>
+    <button class="primary">저장</button>
+  </form>
+</section>
+{% endblock %}
