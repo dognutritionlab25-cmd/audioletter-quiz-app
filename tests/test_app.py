@@ -4011,7 +4011,7 @@ class QuizAppTest(unittest.TestCase):
         self.assertIn("<p>추가 원고</p>\n<p>둘째 문단</p>", page)
         self.assertEqual(page.count('controlsList="nodownload"'), 3)
         self.assertEqual(page.count("첫 문단"), 1)
-        self.assertEqual(page.count("이 콘텐츠는 교육 및 정보 제공을 위한 자료"), 1)
+        self.assertEqual(page.count("교육 및 정보 제공 콘텐츠입니다"), 1)
         self.assertIn(f"/audioletters/{episode_id}/blocks/{extra_id}/audio", page)
         self.assertEqual(self.client.post(new_url, data=info_data).status_code, 200)
         with transaction(self.db_path) as conn:
@@ -4065,6 +4065,64 @@ class QuizAppTest(unittest.TestCase):
             self.assertEqual(rows[0]["transcript"], source)
             self.assertEqual(rows[1]["body"], source)
             self.assertEqual(rows[2]["transcript"], source)
+
+    def test_audioletter_notion_info_markdown_header_footer_and_original_data(self):
+        subscriber_id, episodes = self.audioletter_fixture()
+        episode_id = episodes[7]
+        notion_body = ("\u00a0### 강아지에게 산책은 운동일까요?\r\n\r\n"
+                       "사람은 산책하면서 칼로리를 태우고,\r\n"
+                       "강아지는 산책하면서 **최신 소식을 업데이트합니다.**\r\n\r\n"
+                       "__좋은 냄새를 충분히 맡을 시간을 주세요.__\r\n"
+                       "#### 추가 안내\r\n<script>alert(1)</script>")
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+            state["is_admin"] = True
+            state["csrf_token"] = "notion-csrf"
+        response = self.client.post(f"/admin/audioletters/{episode_id}/blocks/new", data={
+            "csrf_token": "notion-csrf", "sort_order": "2", "block_type": "info",
+            "title": "잠깐 쉬어가기", "body": notion_body,
+        })
+        self.assertEqual(response.status_code, 302)
+        html = self.client.get(f"/audioletters/{episode_id}").get_data(as_text=True)
+        self.assertIn("<h1 class=\"audioletter-episode-heading\">반려견을 읽다 · 시즌1 · 7회</h1>", html)
+        self.assertNotIn("<h1>회차 7</h1>", html)
+        self.assertIn("<h3>강아지에게 산책은 운동일까요?</h3>", html)
+        self.assertIn("<h4>추가 안내</h4>", html)
+        self.assertIn("<strong>최신 소식을 업데이트합니다.</strong>", html)
+        self.assertIn("<strong>좋은 냄새를 충분히 맡을 시간을 주세요.</strong>", html)
+        self.assertIn("칼로리를 태우고,<br>\n강아지는", html)
+        self.assertNotIn("### 강아지", html)
+        self.assertNotIn("**최신", html)
+        self.assertNotIn("__좋은", html)
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+        self.assertEqual(html.count('aria-label="오디오레터 이용 안내"'), 1)
+        self.assertIn("전체 스크립트 보기", html)
+        self.assertIn("담당 수의사와 상담해 주세요", html)
+        self.assertIn("사업자등록번호 854-35-01432", html)
+        self.assertIn("https://www.ftc.go.kr/www/selectBizCommList.do?key=254", html)
+        self.assertIn('href="/terms"', html)
+        self.assertIn('href="/privacy"', html)
+        self.assertIn('controlsList="nodownload"', html)
+        conn = connect(self.db_path)
+        self.assertEqual(conn.execute("SELECT title FROM audioletter_episodes WHERE id=?",
+                                      (episode_id,)).fetchone()[0], "회차 7")
+        self.assertEqual(conn.execute("SELECT body FROM audioletter_blocks WHERE episode_id=? AND sort_order=2",
+                                      (episode_id,)).fetchone()[0], notion_body)
+        conn.close()
+
+    def test_customer_footer_shared_public_pages_and_mobile_styles(self):
+        for path in ("/", "/subscribe", "/terms", "/privacy"):
+            page = self.client.get(path)
+            self.assertEqual(page.status_code, 200, path)
+            html = page.get_data(as_text=True)
+            for text in ("반려견영양연구소", "양연주", "854-35-01432",
+                         "제2026-대전유성-0045호", "어은로 57", "010-8365-1024",
+                         "info@dognutritionlab.com", "사업자정보 확인", "© 2026"):
+                self.assertIn(text, html, path)
+            self.assertIn('href="tel:01083651024"', html)
+            self.assertIn('href="mailto:info@dognutritionlab.com"', html)
+        self.assertIn("@media(max-width:620px){.site-footer", (ROOT / "static/style.css").read_text())
 
     def test_audioletter_legacy_block_delete_requires_admin_csrf(self):
         subscriber_id, episodes = self.audioletter_fixture()
