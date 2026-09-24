@@ -5,7 +5,7 @@
   <p class="eyebrow">시즌{{ episode.season }} · {{ episode.season_episode }}회</p>
   <h1>{{ episode.title }}</h1>
   {% if episode.audio_storage_key %}
-  <audio controls preload="metadata" style="width:100%" src="{{ url_for('audioletters.audioletter_audio', episode_id=episode.id) }}">오디오를 재생할 수 없습니다.</audio>
+  <audio controls controlsList="nodownload" oncontextmenu="return false;" preload="metadata" style="width:100%" src="{{ url_for('audioletters.audioletter_audio', episode_id=episode.id) }}">오디오를 재생할 수 없습니다.</audio>
   {% else %}
   <p class="notice">오디오 파일을 준비 중입니다.</p>
   {% endif %}
