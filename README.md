@@ -192,6 +192,8 @@ Authorization: Bearer <SUBSCRIPTION_REGISTRATION_API_KEY>
 
 사용자는 `/audioletters`에서 서버가 권한에 맞게 조회한 회차만 보고, `/audioletters/<id>`에서 오디오와 접힌 전체 스크립트를 볼 수 있습니다. 직접 오디오 주소 `/audioletters/<id>/audio`를 요청해도 `audioletters.accessible_audioletter_episode()`가 기존 `services.can_access_paid_audioletter()`를 재사용하여 `is_active`, `is_paid_subscriber`, `is_published`, `sequence <= accessible_through`를 검사합니다. 서버는 허용된 요청만 Private Bucket에서 스트리밍하며 단일 HTTP Range 요청을 전달합니다. URL 발급 없이 매 요청마다 권한을 확인하므로 구독 종료 후 **새 요청**은 차단됩니다. 이미 시작한 스트림의 중간 종료나 재생된 파일의 복제 방지는 보장하지 않습니다. 오디오 전송량은 Portal 서비스 트래픽에 포함됩니다. 현재 Quiz의 `episodes`는 이 조건을 사용하지 않습니다.
 
+오디오 플레이어의 `controlsList="nodownload"`와 우클릭 억제는 일반 사용자에게 다운로드 메뉴를 보이지 않게 하는 UX 설정입니다. 파일 저장을 기술적으로 완전히 막는 보안 기능은 아닙니다.
+
 Railway Portal 서비스 Variables에서 아래 값을 같은 환경의 Private Bucket Credentials의 **Variable Reference**로 설정합니다. 실제 인증값을 코드·문서·로그에 기록하지 마세요.
 
 | Portal Variable | Railway Bucket Reference |
