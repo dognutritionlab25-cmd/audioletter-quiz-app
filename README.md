@@ -188,9 +188,21 @@ Authorization: Bearer <SUBSCRIPTION_REGISTRATION_API_KEY>
 
 `audioletter_episodes`는 앱 시작 시 additive schema 초기화로 생성됩니다. Quiz용 `episodes` 및 Quiz 시즌/참여 관계와 연결되지 않습니다. DB의 `id`는 영구 식별자이고 `sequence`는 시즌을 넘어 증가하는 접근권한 비교값입니다. `season`과 `season_episode`는 고객 표시용입니다. `sequence`와 `(season, season_episode)`는 각각 중복을 허용하지 않습니다.
 
-관리자는 `/admin/audioletters`에서 회차를 확인하고 새로 등록하거나 수정할 수 있습니다. 공개 여부도 편집 화면에서 변경합니다. `audio_storage_key`는 향후 Private Bucket 연결을 위한 문자열만 저장하며 업로드나 재생 경로는 없습니다. `transcript`는 HTML로 변환하지 않고 SQLite `TEXT`에 줄바꿈을 보존하여 저장합니다.
+관리자는 `/admin/audioletters`에서 회차를 확인하고 새로 등록하거나 수정할 수 있습니다. 공개 여부도 편집 화면에서 변경합니다. `audio_storage_key`에는 Railway Private Bucket에 실제 존재하는 MP3의 **object key**만 넣습니다(예: `audioletters/season1/007.mp3`). URL이나 비밀키를 넣지 않습니다. 관리자 업로드 기능과 자동 데이터 삽입 기능은 없습니다. `transcript`는 HTML로 변환하지 않고 SQLite `TEXT`에 줄바꿈을 보존하여 저장합니다.
 
-향후 사용자용 콘텐츠 경로에서는 `audioletters.accessible_audioletter_episode()`로 구독자와 공개 회차를 조회해야 합니다. 이 함수는 기존 `services.can_access_paid_audioletter()`를 재사용하여 `is_active`, `is_paid_subscriber`, `is_published`, `sequence <= accessible_through`를 모두 확인한 후에만 콘텐츠 행을 돌려줍니다. 이번 단계에는 사용자용 목록·스크립트·오디오 endpoint를 추가하지 않았습니다. 현재 Quiz의 `episodes`는 이 조건을 사용하지 않습니다.
+사용자는 `/audioletters`에서 서버가 권한에 맞게 조회한 회차만 보고, `/audioletters/<id>`에서 오디오와 접힌 전체 스크립트를 볼 수 있습니다. 직접 오디오 주소 `/audioletters/<id>/audio`를 요청해도 `audioletters.accessible_audioletter_episode()`가 기존 `services.can_access_paid_audioletter()`를 재사용하여 `is_active`, `is_paid_subscriber`, `is_published`, `sequence <= accessible_through`를 검사합니다. 서버는 허용된 요청만 Private Bucket에서 스트리밍하며 단일 HTTP Range 요청을 전달합니다. URL 발급 없이 매 요청마다 권한을 확인하므로 구독 종료 후 **새 요청**은 차단됩니다. 이미 시작한 스트림의 중간 종료나 재생된 파일의 복제 방지는 보장하지 않습니다. 오디오 전송량은 Portal 서비스 트래픽에 포함됩니다. 현재 Quiz의 `episodes`는 이 조건을 사용하지 않습니다.
+
+Railway Portal 서비스 Variables에서 아래 값을 같은 환경의 Private Bucket Credentials의 **Variable Reference**로 설정합니다. 실제 인증값을 코드·문서·로그에 기록하지 마세요.
+
+| Portal Variable | Railway Bucket Reference |
+| --- | --- |
+| `AUDIOLETTER_BUCKET_NAME` | `BUCKET` (S3 API용 이름) |
+| `AUDIOLETTER_BUCKET_ENDPOINT` | `ENDPOINT` |
+| `AUDIOLETTER_BUCKET_REGION` | `REGION` |
+| `AUDIOLETTER_BUCKET_ACCESS_KEY_ID` | `ACCESS_KEY_ID` |
+| `AUDIOLETTER_BUCKET_SECRET_ACCESS_KEY` | `SECRET_ACCESS_KEY` |
+
+`AUDIOLETTER_BUCKET_ADDRESSING_STYLE`은 선택사항이며 기본값은 `auto`입니다. 이전 방식의 Bucket에서 Railway Credentials에 path-style이라고 명시되어 있다면 `path`로 설정합니다. 테스트 MP3를 Bucket에 `audioletters/season1/007.mp3`처럼 업로드한 후 `/admin/audioletters/new`의 **오디오 저장 키**에 같은 object key를 입력하고 공개 상태를 선택합니다. 해당 subscriber가 유료·활성이고 `accessible_through >= 7`이어야 합니다. `AUDIOLETTER_BUCKET_*` 설정이 없으면 오디오 제공만 503을 반환하며, 기존 Portal의 다른 기능은 그대로 사용할 수 있습니다.
 
 ## 인증과 Quiz core의 분리
 
