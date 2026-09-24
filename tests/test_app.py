@@ -20,7 +20,7 @@ from magic_links import (
 )
 from presenters import feedback_summary, format_korean_datetime
 from quiz_csv_import import import_quiz_rows, parse_quiz_csv, preview_quiz_import
-from services import complete_attempt, email_hash, save_answer, save_feedback, start_attempt, subscriber_counts
+from services import can_access_paid_audioletter, complete_attempt, email_hash, save_answer, save_feedback, start_attempt, subscriber_counts
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1951,6 +1951,118 @@ class QuizAppTest(unittest.TestCase):
             response.get_json()["error"],
             "is_paid_subscriber must be a boolean",
         )
+
+    def test_audioletter_sync_initialization_monotonic_updates_and_paid_cycle(self):
+        headers = {"Authorization": "Bearer sync-test-secret"}
+        email = "audioletter@example.invalid"
+
+        initial = self.client.post(
+            "/api/subscribers/sync", headers=headers,
+            json={"email": email, "is_paid_subscriber": True, "accessible_through": 6},
+        )
+        self.assertEqual(initial.status_code, 201)
+        self.assertEqual(initial.get_json()["subscriber"]["accessible_through"], 6)
+        public_id = initial.get_json()["subscriber"]["public_id"]
+
+        for value, expected_status, expected_through in (
+            (7, "updated", 7), (43, "updated", 43),
+            (7, "unchanged", 43), (43, "unchanged", 43),
+        ):
+            response = self.client.post(
+                "/api/subscribers/sync", headers=headers,
+                json={"email": email, "accessible_through": value},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["status"], expected_status)
+            self.assertEqual(response.get_json()["subscriber"]["accessible_through"], expected_through)
+
+        for paid in (False, True):
+            response = self.client.post(
+                "/api/subscribers/sync", headers=headers,
+                json={"email": email, "is_paid_subscriber": paid},
+            )
+            self.assertEqual(response.get_json()["subscriber"]["is_paid_subscriber"], paid)
+            self.assertEqual(response.get_json()["subscriber"]["accessible_through"], 43)
+            self.assertEqual(response.get_json()["subscriber"]["public_id"], public_id)
+
+        unchanged = self.client.post(
+            "/api/subscribers/sync", headers=headers, json={"email": email},
+        )
+        self.assertEqual(unchanged.get_json()["status"], "unchanged")
+        self.assertEqual(unchanged.get_json()["subscriber"]["accessible_through"], 43)
+        conn = connect(self.db_path)
+        person = conn.execute(
+            "SELECT * FROM subscribers WHERE email_hash=?",
+            (email_hash(email, "migration-test-secret"),),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(person["accessible_through"], 43)
+        self.assertNotIn(email, " ".join(str(v) for v in person if v is not None))
+        self.assertTrue(can_access_paid_audioletter(person, 43, True))
+
+    def test_audioletter_sync_rejects_non_integer_and_out_of_range_values(self):
+        headers = {"Authorization": "Bearer sync-test-secret"}
+        email = "bad-range@example.invalid"
+        for invalid in (None, True, False, 6.0, "6", -1, 2**63):
+            response = self.client.post(
+                "/api/subscribers/sync", headers=headers,
+                json={"email": email, "accessible_through": invalid},
+            )
+            self.assertEqual(response.status_code, 400, repr(invalid))
+        conn = connect(self.db_path)
+        self.assertIsNone(conn.execute(
+            "SELECT id FROM subscribers WHERE email_hash=?",
+            (email_hash(email, "migration-test-secret"),),
+        ).fetchone())
+        conn.close()
+
+    def test_audioletter_existing_subscriber_migration_preserves_identity_and_flags(self):
+        legacy_db = str(Path(self.temp.name) / "audioletter-upgrade.db")
+        raw = sqlite3.connect(legacy_db)
+        raw.execute(
+            """CREATE TABLE subscribers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT NOT NULL UNIQUE, display_name TEXT,
+                email_hash TEXT UNIQUE, is_test INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                is_paid_subscriber INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL)"""
+        )
+        raw.execute(
+            """INSERT INTO subscribers
+               (public_id,email_hash,is_active,is_paid_subscriber,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("kept-id", "kept-hash", 1, 1, utcnow()),
+        )
+        raw.commit()
+        raw.close()
+        config = {
+            "TESTING": True, "SECRET_KEY": "migration-test",
+            "DB_PATH": legacy_db, "ENABLE_TEST_IDENTITY": False,
+            "SEED_DEMO_DATA": False,
+        }
+        create_app(config)
+        create_app(config)  # Startup migration remains idempotent.
+        conn = connect(legacy_db)
+        row = conn.execute(
+            "SELECT id,public_id,email_hash,is_active,is_paid_subscriber,accessible_through "
+            "FROM subscribers WHERE public_id='kept-id'"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(tuple(row), (1, "kept-id", "kept-hash", 1, 1, None))
+
+    def test_audioletter_access_helper_uses_paid_active_published_and_sequence(self):
+        subscriber = {"is_active": 1, "is_paid_subscriber": 1, "accessible_through": 43}
+        self.assertTrue(can_access_paid_audioletter(subscriber, 42, True))
+        self.assertTrue(can_access_paid_audioletter(subscriber, 43, True))
+        self.assertFalse(can_access_paid_audioletter(subscriber, 44, True))
+        self.assertFalse(can_access_paid_audioletter(subscriber, 43, False))
+        self.assertFalse(can_access_paid_audioletter(None, 43, True))
+        for field in ("is_active", "is_paid_subscriber"):
+            blocked = dict(subscriber, **{field: 0})
+            self.assertFalse(can_access_paid_audioletter(blocked, 43, True))
+        self.assertFalse(can_access_paid_audioletter(dict(subscriber, accessible_through=None), 7, True))
+        self.assertFalse(can_access_paid_audioletter(subscriber, True, True))
 
     def test_82_community_requires_login_and_paid_status_only(self):
         unauthenticated = self.client.get("/community")
