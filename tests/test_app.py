@@ -1241,7 +1241,8 @@ class QuizAppTest(unittest.TestCase):
         response = self.client.get("/")
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("오디오레터에서 안내된 회차", html)
+        self.assertIn("반려견영양연구소 구독자 포털", html)
+        self.assertNotIn("오디오레터 이해 테스트", html)
         self.assertNotIn("R018", html)
         self.assertNotIn("R042", html)
         self.assertNotIn("/quiz?episode=", html)
@@ -4096,11 +4097,14 @@ class QuizAppTest(unittest.TestCase):
         self.assertNotIn("__좋은", html)
         self.assertNotIn("<script>alert(1)</script>", html)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
-        self.assertEqual(html.count('aria-label="오디오레터 이용 안내"'), 1)
+        self.assertEqual(html.count('aria-label="청취 안내"'), 1)
+        self.assertEqual(html.count('aria-label="콘텐츠 이용 안내"'), 1)
+        self.assertLess(html.index('aria-label="청취 안내"'), html.index('aria-label="콘텐츠 이용 안내"'))
+        self.assertNotIn("안정적인 재생을 위해 최신 브라우저", html)
         self.assertIn("전체 스크립트 보기", html)
         self.assertIn("담당 수의사와 상담해 주세요", html)
-        self.assertIn("사업자등록번호 854-35-01432", html)
-        self.assertIn("https://www.ftc.go.kr/www/selectBizCommList.do?key=254", html)
+        self.assertNotIn("사업자등록번호 854-35-01432", html)
+        self.assertNotIn("https://www.ftc.go.kr/www/selectBizCommList.do?key=254", html)
         self.assertIn('href="/terms"', html)
         self.assertIn('href="/privacy"', html)
         self.assertIn('controlsList="nodownload"', html)
@@ -4111,18 +4115,53 @@ class QuizAppTest(unittest.TestCase):
                                       (episode_id,)).fetchone()[0], notion_body)
         conn.close()
 
-    def test_customer_footer_shared_public_pages_and_mobile_styles(self):
-        for path in ("/", "/subscribe", "/terms", "/privacy"):
-            page = self.client.get(path)
-            self.assertEqual(page.status_code, 200, path)
-            html = page.get_data(as_text=True)
-            for text in ("반려견영양연구소", "양연주", "854-35-01432",
-                         "제2026-대전유성-0045호", "어은로 57", "010-8365-1024",
-                         "info@dognutritionlab.com", "사업자정보 확인", "© 2026"):
-                self.assertIn(text, html, path)
-            self.assertIn('href="tel:01083651024"', html)
-            self.assertIn('href="mailto:info@dognutritionlab.com"', html)
-        self.assertIn("@media(max-width:620px){.site-footer", (ROOT / "static/style.css").read_text())
+    def test_customer_footer_home_only_and_responsive(self):
+        home = self.client.get("/").get_data(as_text=True)
+        footer = home.split('<footer class="site-footer', 1)[1]
+        for item in ("반려견영양연구소", "양연주", "854-35-01432",
+                     "제2026-대전유성-0045호", "어은로 57", "010-8365-1024",
+                     "info@dognutritionlab.com", "사업자정보 확인", "© 2026"):
+            self.assertIn(item, footer)
+        self.assertIn('href="tel:01083651024"', footer)
+        self.assertIn('href="mailto:info@dognutritionlab.com"', footer)
+        self.assertIn('href="https://www.ftc.go.kr/www/selectBizCommList.do?key=254"', footer)
+        for path in ("/subscribe", "/terms", "/privacy"):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200, path)
+            other_footer = response.get_data(as_text=True).split('<footer class="site-footer', 1)[1]
+            self.assertNotIn("사업자등록번호", other_footer)
+            self.assertNotIn("사업자정보 확인", other_footer)
+            self.assertIn('href="/terms"', other_footer)
+            self.assertIn('href="/privacy"', other_footer)
+        css = (ROOT / "static/style.css").read_text()
+        self.assertIn("@media(max-width:620px){.portal-home-links", css)
+        self.assertIn(".site-footer-home .footer-links", css)
+
+    def test_customer_portal_home_cards_use_existing_access_rules(self):
+        html = self.client.get("/").get_data(as_text=True)
+        for heading, href in (("오디오레터", "/audioletters"), ("자료실", "/resources"),
+                              ("구독자 게시판", "/community"), ("나의 참여", "/me")):
+            self.assertIn(f"<h2>{heading}</h2>", html)
+            self.assertIn(f'href="{href}"', html)
+            self.assertEqual(self.client.get(href).status_code, 302)
+        self.assertIn("오디오레터를 듣고, 필요한 자료를 찾아보고,", html)
+        self.assertNotIn("오디오레터 이해 테스트", html)
+        subscriber_id, episodes = self.audioletter_fixture()
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+        for path in ("/audioletters", "/resources", "/community", "/me"):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200, path)
+            self.assertNotIn("사업자등록번호", response.get_data(as_text=True).split("<footer", 1)[1])
+        detail = self.client.get(f"/audioletters/{episodes[7]}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertNotIn("사업자등록번호", detail.get_data(as_text=True).split("<footer", 1)[1])
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE subscribers SET is_paid_subscriber=0 WHERE id=?", (subscriber_id,))
+        self.assertEqual(self.client.get("/community").status_code, 403)
+        self.assertEqual(self.client.get("/audioletters").status_code, 403)
+        self.assertEqual(self.client.get("/resources").status_code, 200)
+        self.assertEqual(self.client.get("/me").status_code, 200)
 
     def test_audioletter_legacy_block_delete_requires_admin_csrf(self):
         subscriber_id, episodes = self.audioletter_fixture()
