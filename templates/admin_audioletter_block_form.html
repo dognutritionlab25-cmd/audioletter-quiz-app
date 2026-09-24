@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+{% block title %}{{ '블록 수정' if block_id else '블록 추가' }} · 오디오레터 관리자{% endblock %}
+{% block content %}
+<div class="admin-head"><h1>시즌{{ episode.season }} · {{ episode.season_episode }}회 — {{ '블록 수정' if block_id else '블록 추가' }}</h1>
+  <a class="secondary button-link" href="{{ url_for('audioletters.admin_audioletter_edit', episode_id=episode.id) }}">회차로 돌아가기</a></div>
+<section class="card"><form method="post" class="form-grid">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label>표시 순서<input type="number" name="sort_order" min="1" required value="{{ block.sort_order }}"></label>
+  <label>블록 유형<select name="block_type"><option value="audio" {% if block.block_type == 'audio' %}selected{% endif %}>오디오</option><option value="info" {% if block.block_type == 'info' %}selected{% endif %}>정보 / 텍스트</option></select></label>
+  <label class="wide">제목 또는 라벨<input name="title" maxlength="200" value="{{ block.title or '' }}"></label>
+  <label class="wide">정보 블록 내용<textarea name="body" rows="12">{{ block.body or '' }}</textarea></label>
+  <label class="wide">오디오 저장 키 (오디오 블록)<input name="audio_storage_key" value="{{ block.audio_storage_key or '' }}" placeholder="예: audioletters/season1/008-extra.mp3"></label>
+  <label class="wide">오디오 전체 스크립트<textarea name="transcript" rows="14">{{ block.transcript or '' }}</textarea></label>
+  <button class="primary">저장</button>
+</form></section>
+{% endblock %}
