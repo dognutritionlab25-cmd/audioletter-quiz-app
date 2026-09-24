@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}오디오레터 관리 · 관리자{% endblock %}
+{% block content %}
+<div class="admin-head">
+  <div><p class="eyebrow">ADMIN</p><h1>오디오레터 관리</h1></div>
+  <div><a class="secondary button-link" href="{{ url_for('admin_dashboard') }}">관리자 홈</a> <a class="primary button-link" href="{{ url_for('audioletters.admin_audioletter_new') }}">새 회차</a></div>
+</div>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>내부 회차</th><th>고객 표시</th><th>제목</th><th>오디오 키</th><th>상태</th><th></th></tr></thead>
+    <tbody>
+      {% for episode in episodes %}
+      <tr>
+        <td>{{ episode.sequence }}</td>
+        <td>시즌{{ episode.season }} · {{ episode.season_episode }}회</td>
+        <td>{{ episode.title }}</td>
+        <td>{{ '입력됨' if episode.audio_storage_key else '미입력' }}</td>
+        <td>{{ '공개' if episode.is_published else '비공개' }}</td>
+        <td><a href="{{ url_for('audioletters.admin_audioletter_edit', episode_id=episode.id) }}">수정</a></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="empty">등록된 오디오레터 회차가 없습니다.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
