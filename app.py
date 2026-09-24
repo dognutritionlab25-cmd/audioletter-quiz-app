@@ -179,28 +179,38 @@ def create_app(test_config=None):
         if paid_supplied and type(paid) is not bool:
             return {"error": "is_paid_subscriber must be a boolean"}, 400
 
+        through_supplied = "accessible_through" in payload
+        accessible_through = payload.get("accessible_through")
+        if through_supplied and (
+            type(accessible_through) is not int
+            or not 0 <= accessible_through <= 2**63 - 1
+        ):
+            return {"error": "accessible_through must be a non-negative integer"}, 400
+
         digest = email_hash(normalized_email, app.config["MIGRATION_HASH_SECRET"])
         requested_active = int(active) if active_supplied else 1
         requested_paid = int(paid) if paid_supplied else 0
+        requested_through = accessible_through if through_supplied else None
         generated_public_id = f"sub_{secrets.token_urlsafe(12)}"
         changed = False
 
         with transaction(app.config["DB_PATH"]) as conn:
             inserted = conn.execute(
                 """INSERT OR IGNORE INTO subscribers
-                   (public_id,display_name,email_hash,is_test,is_active,is_paid_subscriber,created_at)
-                   VALUES(?,?,?,0,?,?,?)""",
+                   (public_id,display_name,email_hash,is_test,is_active,is_paid_subscriber,accessible_through,created_at)
+                   VALUES(?,?,?,0,?,?,?,?)""",
                 (
                     generated_public_id,
                     display_name,
                     digest,
                     requested_active,
                     requested_paid,
+                    requested_through,
                     utcnow(),
                 ),
             ).rowcount == 1
             subscriber = conn.execute(
-                """SELECT id,public_id,display_name,is_test,is_active,is_paid_subscriber
+                """SELECT id,public_id,display_name,is_test,is_active,is_paid_subscriber,accessible_through
                    FROM subscribers WHERE email_hash=?""",
                 (digest,),
             ).fetchone()
@@ -225,6 +235,12 @@ def create_app(test_config=None):
                 ):
                     updates.append("is_paid_subscriber=?")
                     parameters.append(int(paid))
+                if through_supplied and (
+                    subscriber["accessible_through"] is None
+                    or accessible_through > subscriber["accessible_through"]
+                ):
+                    updates.append("accessible_through=?")
+                    parameters.append(accessible_through)
                 if updates:
                     parameters.append(subscriber["id"])
                     conn.execute(
@@ -239,7 +255,7 @@ def create_app(test_config=None):
                         (utcnow(), subscriber["id"]),
                     )
                 subscriber = conn.execute(
-                    """SELECT id,public_id,display_name,is_test,is_active,is_paid_subscriber
+                    """SELECT id,public_id,display_name,is_test,is_active,is_paid_subscriber,accessible_through
                        FROM subscribers WHERE id=?""",
                     (subscriber["id"],),
                 ).fetchone()
@@ -267,6 +283,7 @@ def create_app(test_config=None):
                 "public_id": subscriber["public_id"],
                 "active": bool(subscriber["is_active"]),
                 "is_paid_subscriber": bool(subscriber["is_paid_subscriber"]),
+                "accessible_through": subscriber["accessible_through"],
             },
         }, 201 if inserted else 200
 

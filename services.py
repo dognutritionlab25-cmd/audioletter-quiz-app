@@ -4,6 +4,20 @@ import json
 from db import transaction, utcnow
 
 
+def can_access_paid_audioletter(subscriber, sequence, is_published):
+    """Check an audioletter's server-side entitlement before serving its content."""
+    if subscriber is None or type(sequence) is not int or sequence < 1:
+        return False
+    through = subscriber["accessible_through"]
+    return (
+        bool(subscriber["is_active"])
+        and bool(subscriber["is_paid_subscriber"])
+        and bool(is_published)
+        and through is not None
+        and sequence <= through
+    )
+
+
 def subscriber_counts(conn, subscriber_id, season_id=None):
     current_total = conn.execute(
         "SELECT COUNT(*) FROM participation WHERE subscriber_id=?", (subscriber_id,)

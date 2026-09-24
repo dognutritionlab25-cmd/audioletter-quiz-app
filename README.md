@@ -109,6 +109,7 @@ python app.py
 - `feedback_submissions`, `feedback_answers`: 회원 또는 과거 익명 피드백
 - `resources`: 자료 제목·본문·카테고리·외부 링크·공개 상태와 작성/수정 시각
 - `subscribers.is_paid_subscriber`: Google Sheet/Make가 판단한 현재 유료 구독 상태. `is_active`와 별도
+- `subscribers.accessible_through`: 해당 구독자에게 시스템상 공개된 최신 오디오레터 내부 연속 회차. 기존 구독자는 `NULL`로 유지하고 실제 범위 동기화 시에만 설정
 - `community_posts`, `community_comments`, `community_likes`: 게시글·댓글·게시글별 subscriber 1회 좋아요
 - `portal_settings`: 결제 안내 공개 여부와 이용약관·개인정보처리방침 시행일(단일 설정 행)
 - `subscription_registrations`: 결제 후 입력한 유료 구독 등록 신청의 메타데이터·이메일 HMAC·처리 상태
@@ -179,6 +180,8 @@ Authorization: Bearer <SUBSCRIPTION_REGISTRATION_API_KEY>
 - 필드 생략: 기존 subscriber의 유료 상태를 변경하지 않음. 신규 subscriber는 기본 `false`
 
 유료 구독 종료는 `active`를 `false`로 만드는 작업이 아닙니다. `is_active`는 계정 사용 가능 여부로 계속 분리하여 유지합니다.
+
+오디오레터 접근 범위는 선택 입력 `"accessible_through": 6`처럼 같은 sync API에 전달합니다. 신규 유료 등록은 Sheet의 초기 L=6을 전달할 수 있고, 향후 7회차 전용 Make의 Sheet #5 및 Master의 Sheet #20 업데이트가 성공한 뒤 해당 회차 값을 전달할 예정입니다. 이 필드가 없으면 기존 범위를 그대로 두고, 전달되면 0 이상의 정수만 받아 기존 값보다 큰 경우에만 저장합니다. `is_paid_subscriber=false` 또는 재구독 sync도 범위를 지우지 않습니다. 현재 오디오레터 콘텐츠 및 접근 경로는 아직 구현되지 않았습니다.
 
 ## 인증과 Quiz core의 분리
 
