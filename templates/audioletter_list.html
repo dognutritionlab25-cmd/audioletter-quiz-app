@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block title %}오디오레터 · 반려견영양연구소{% endblock %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">AUDIOLETTER</p>
+  <h1>오디오레터</h1>
+  <p>현재 공개되어 들을 수 있는 회차입니다.</p>
+</section>
+<section class="stack">
+  {% for episode in episodes %}
+  <a class="card row-card resource-card" href="{{ url_for('audioletters.audioletter_detail', episode_id=episode.id) }}">
+    <span><span class="resource-category">시즌{{ episode.season }} · {{ episode.season_episode }}회</span><h2>{{ episode.title }}</h2></span>
+    <span aria-hidden="true">›</span>
+  </a>
+  {% else %}
+  <div class="empty">현재 공개된 오디오레터 회차가 없습니다.</div>
+  {% endfor %}
+</section>
+{% endblock %}

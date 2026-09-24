@@ -11,7 +11,7 @@
     <a href="{{ url_for('index') }}" class="brand">반려견영양연구소</a>
     <nav>
       <a href="{{ url_for('public_pages.subscribe') }}">구독 안내</a>
-      {% if session.get('subscriber_id') %}<a href="{{ url_for('resources.resource_list') }}">자료실</a>{% if current_subscriber_is_paid() %}<a href="{{ url_for('community.post_list') }}">구독자 게시판</a>{% endif %}<a href="{{ url_for('my_history') }}">나의 참여</a>{% endif %}
+      {% if session.get('subscriber_id') %}<a href="{{ url_for('resources.resource_list') }}">자료실</a><a href="{{ url_for('audioletters.audioletter_list') }}">오디오레터</a>{% if current_subscriber_is_paid() %}<a href="{{ url_for('community.post_list') }}">구독자 게시판</a>{% endif %}<a href="{{ url_for('my_history') }}">나의 참여</a>{% endif %}
       {% if session.get('is_admin') %}<a href="{{ url_for('admin_dashboard') }}">관리자</a>{% endif %}
     </nav>
   </header>
