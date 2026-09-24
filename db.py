@@ -47,11 +47,29 @@ CREATE TABLE IF NOT EXISTS audioletter_episodes (
     title TEXT NOT NULL,
     audio_storage_key TEXT,
     transcript TEXT NOT NULL DEFAULT '',
+    quiz_episode_code TEXT REFERENCES episodes(code),
     is_published INTEGER NOT NULL DEFAULT 0 CHECK(is_published IN (0,1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(season, season_episode)
 );
+
+CREATE TABLE IF NOT EXISTS audioletter_blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id INTEGER NOT NULL REFERENCES audioletter_episodes(id) ON DELETE CASCADE,
+    sort_order INTEGER NOT NULL CHECK(sort_order >= 1),
+    block_type TEXT NOT NULL CHECK(block_type IN ('audio','info')),
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    audio_storage_key TEXT,
+    transcript TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(episode_id, sort_order)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audioletter_blocks_episode_order
+    ON audioletter_blocks(episode_id, sort_order);
 
 CREATE TABLE IF NOT EXISTS questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -315,6 +333,8 @@ def init_db(path):
             "accessible_through",
             "INTEGER CHECK(accessible_through >= 0)",
         )
+        _add_column_if_missing(conn, "audioletter_episodes", "quiz_episode_code",
+                               "TEXT REFERENCES episodes(code)")
         conn.execute(
             """INSERT OR IGNORE INTO portal_settings
                (id,subscription_page_enabled,terms_effective_date,

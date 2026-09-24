@@ -110,7 +110,8 @@ python app.py
 - `resources`: 자료 제목·본문·카테고리·외부 링크·공개 상태와 작성/수정 시각
 - `subscribers.is_paid_subscriber`: Google Sheet/Make가 판단한 현재 유료 구독 상태. `is_active`와 별도
 - `subscribers.accessible_through`: 해당 구독자에게 시스템상 공개된 최신 오디오레터 내부 연속 회차. 기존 구독자는 `NULL`로 유지하고 실제 범위 동기화 시에만 설정
-- `audioletter_episodes`: Quiz `episodes`와 분리된 오디오레터 콘텐츠. 고유 내부 `sequence`, 시즌·시즌 내 표시 회차, 제목, 향후 비공개 오디오 저장 키, 원문 스크립트, 공개 상태를 저장
+- `audioletter_episodes`: Quiz `episodes`와 분리된 오디오레터 회차 메타데이터·entitlement 기준. 기존 단일 오디오/스크립트 열은 7회차 등 이전 데이터 호환을 위해 유지
+- `audioletter_blocks`: 회차별 순서 있는 `audio`/`info` 콘텐츠. 오디오 블록의 비공개 object key·스크립트, 정보 블록의 본문을 각각 저장
 - `community_posts`, `community_comments`, `community_likes`: 게시글·댓글·게시글별 subscriber 1회 좋아요
 - `portal_settings`: 결제 안내 공개 여부와 이용약관·개인정보처리방침 시행일(단일 설정 행)
 - `subscription_registrations`: 결제 후 입력한 유료 구독 등록 신청의 메타데이터·이메일 HMAC·처리 상태
@@ -191,6 +192,10 @@ Authorization: Bearer <SUBSCRIPTION_REGISTRATION_API_KEY>
 관리자는 `/admin/audioletters`에서 회차를 확인하고 새로 등록하거나 수정할 수 있습니다. 공개 여부도 편집 화면에서 변경합니다. `audio_storage_key`에는 Railway Private Bucket에 실제 존재하는 MP3의 **object key**만 넣습니다(예: `audioletters/season1/007.mp3`). URL이나 비밀키를 넣지 않습니다. 관리자 업로드 기능과 자동 데이터 삽입 기능은 없습니다. `transcript`는 HTML로 변환하지 않고 SQLite `TEXT`에 줄바꿈을 보존하여 저장합니다.
 
 사용자는 `/audioletters`에서 서버가 권한에 맞게 조회한 회차만 보고, `/audioletters/<id>`에서 오디오와 접힌 전체 스크립트를 볼 수 있습니다. 직접 오디오 주소 `/audioletters/<id>/audio`를 요청해도 `audioletters.accessible_audioletter_episode()`가 기존 `services.can_access_paid_audioletter()`를 재사용하여 `is_active`, `is_paid_subscriber`, `is_published`, `sequence <= accessible_through`를 검사합니다. 서버는 허용된 요청만 Private Bucket에서 스트리밍하며 단일 HTTP Range 요청을 전달합니다. URL 발급 없이 매 요청마다 권한을 확인하므로 구독 종료 후 **새 요청**은 차단됩니다. 이미 시작한 스트림의 중간 종료나 재생된 파일의 복제 방지는 보장하지 않습니다. 오디오 전송량은 Portal 서비스 트래픽에 포함됩니다. 현재 Quiz의 `episodes`는 이 조건을 사용하지 않습니다.
+
+회차 안의 오디오와 정보는 `audioletter_blocks`로 순서를 정합니다. 기존 단일 오디오 회차는 블록이 없을 때 기존 `audio_storage_key`/`transcript`로 계속 표시됩니다. 해당 회차에 처음 블록을 추가할 때 기존 오디오·스크립트를 첫 블록으로 한 번 복사하며, 이후에는 블록이 콘텐츠의 기준입니다. 기존 `/audioletters/<id>/audio` URL은 첫 오디오에 계속 연결됩니다. 각 추가 오디오는 `/audioletters/<id>/blocks/<block_id>/audio`에서 동일한 권한 확인과 프록시·Range 처리 후 제공됩니다. 관리자는 `/admin/audioletters/<id>/edit`에서 블록을 추가·수정·삭제하고 표시 순서를 지정합니다. 상세 페이지의 공통 이용 안내는 `templates/audioletter_disclaimer.html` 한 곳에서 관리합니다.
+
+기존 Quiz의 `episodes` 테이블은 별개입니다. 연결이 검증된 회차에만 관리자 화면에서 기존 Quiz 코드를 선택 입력하며, Quiz가 공개되어 있고 문항이 있을 때만 링크가 보입니다. 피드백 링크는 기존 Quiz 참여 기록이 확인된 경우에만 표시됩니다. Notion 시즌1 42회와 MP3 이전은 아직 수행하지 않았습니다. 파일 출처·권한·중첩 구성 검증 및 import 단계는 `docs/audioletter_migration_plan.md`를 참조하세요.
 
 오디오 플레이어의 `controlsList="nodownload"`와 우클릭 억제는 일반 사용자에게 다운로드 메뉴를 보이지 않게 하는 UX 설정입니다. 파일 저장을 기술적으로 완전히 막는 보안 기능은 아닙니다.
 
