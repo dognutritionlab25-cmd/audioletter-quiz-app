@@ -13,3 +13,26 @@
 .footer-links{display:flex;gap:6px 15px;flex-wrap:wrap}
 .site-footer small{font-size:.75rem}
 @media(max-width:620px){.site-footer{padding:16px 18px 30px;font-size:.76rem}.footer-links{gap:6px 12px}}
+
+/* Customer Portal home and concise audioletter guidance. */
+.portal-hero{text-align:left;padding:18px 4px 26px}
+.portal-hero h1{font-size:clamp(1.55rem,4vw,2rem);line-height:1.35;margin:.35em 0}
+.portal-hero p:last-child{color:var(--muted);margin-bottom:0}
+.portal-home-links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.portal-home-card{display:flex;flex-direction:column;align-items:flex-start}
+.portal-home-card h2{font-size:1.12rem;margin:0}
+.portal-home-card p{color:var(--muted);font-size:.91rem;margin:12px 0 18px}
+.portal-home-card a{color:var(--green-dark);font-weight:750;text-decoration:none;margin-top:auto}
+.portal-home-card a:hover{text-decoration:underline}
+.audioletter-listening-guide h2{font-size:1.08rem;margin:0 0 12px}
+.audioletter-listening-guide ul{margin:0;padding-left:1.25em}
+.audioletter-listening-guide li+li{margin-top:6px}
+.audioletter-content-notice{padding:8px 4px;color:var(--muted);font-size:.82rem;line-height:1.65}
+.audioletter-content-notice h2{font-size:.92rem;color:var(--muted);font-weight:650;margin:0 0 6px}
+.audioletter-content-notice p{margin:0 0 8px}
+.site-footer-home{max-width:900px;gap:5px;border:0;padding-top:0;font-size:.72rem}
+.site-footer-home .footer-business{line-height:1.5}
+.site-footer-home .footer-links{gap:4px 12px}
+.site-footer-home .footer-links small{font-size:inherit}
+.site-footer-minimal{border:0;align-items:center}
+@media(max-width:620px){.portal-home-links{grid-template-columns:1fr}.portal-hero{padding:8px 0 22px}.portal-hero br{display:none}.site-footer-home{font-size:.71rem}.site-footer-home .footer-links{justify-content:flex-start}}
