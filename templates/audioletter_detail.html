@@ -2,8 +2,7 @@
 {% block title %}{{ episode.title }} · 오디오레터{% endblock %}
 {% block content %}
 <section class="card stack">
-  <p class="eyebrow">시즌{{ episode.season }} · {{ episode.season_episode }}회</p>
-  <h1>{{ episode.title }}</h1>
+  <h1 class="audioletter-episode-heading">반려견을 읽다 · 시즌{{ episode.season }} · {{ episode.season_episode }}회</h1>
   {% for block in blocks %}
   <section class="card">
     {% if block.title %}<h2>{{ block.title }}</h2>{% endif %}
@@ -12,20 +11,20 @@
       <audio controls controlsList="nodownload" oncontextmenu="return false;" preload="metadata" style="width:100%" src="{{ url_for('audioletters.audioletter_block_audio', episode_id=episode.id, block_id=block.id) if block.id else url_for('audioletters.audioletter_audio', episode_id=episode.id) }}">오디오를 재생할 수 없습니다.</audio>
       {% else %}<p class="notice">오디오 파일을 준비 중입니다.</p>{% endif %}
       {% if block.transcript %}<details><summary>전체 스크립트 보기</summary>
-        <div class="resource-body">{{ block.transcript }}</div>
+        <div class="resource-body audioletter-markdown">{{ block.transcript|audioletter_text }}</div>
       </details>{% endif %}
     {% elif block.block_type == 'info' %}
-      <div class="resource-body">{{ block.body }}</div>
+      <div class="resource-body audioletter-markdown">{{ block.body|audioletter_text }}</div>
     {% endif %}
   </section>
   {% endfor %}
+  {% include 'audioletter_disclaimer.html' %}
   {% if quiz %}
   <section class="card"><h2>이해테스트 · 피드백</h2>
     <a class="secondary button-link" href="{{ url_for('quiz_entry', episode=quiz.code) }}">이해테스트 하기</a>
     {% if participated %}<a class="secondary button-link" href="{{ url_for('feedback', code=quiz.code) }}">피드백 남기기</a>{% endif %}
   </section>
   {% endif %}
-  {% include 'audioletter_disclaimer.html' %}
   <p><a class="secondary button-link" href="{{ url_for('audioletters.audioletter_list') }}">목록으로</a></p>
 </section>
 {% endblock %}
