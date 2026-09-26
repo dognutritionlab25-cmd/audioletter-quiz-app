@@ -20,7 +20,7 @@ from auth import (
     subscriber_required,
 )
 from audioletters import audioletters_bp
-from audioletter_text import render_audioletter_text
+from audioletter_text import render_audioletter_text, render_audioletter_title
 from community import community_bp
 from db import connect, init_db, transaction, utcnow
 from magic_links import (
@@ -113,6 +113,7 @@ def create_app(test_config=None):
     app.jinja_env.globals["current_subscriber_is_paid"] = current_subscriber_is_paid
     app.jinja_env.filters["korean_datetime"] = format_korean_datetime
     app.jinja_env.filters["audioletter_text"] = render_audioletter_text
+    app.jinja_env.filters["audioletter_title"] = render_audioletter_title
     app.register_blueprint(resources_bp)
     app.register_blueprint(audioletters_bp)
     app.register_blueprint(community_bp)
