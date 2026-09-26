@@ -4266,19 +4266,52 @@ class QuizAppTest(unittest.TestCase):
             conn.execute("UPDATE audioletter_episodes SET quiz_episode_code='R041' WHERE id=?",
                          (episodes[7],))
             conn.execute("UPDATE episodes SET is_published=1 WHERE id=?", (quiz["id"],))
+            from audioletters import _promote_legacy_block
+            episode = conn.execute("SELECT * FROM audioletter_episodes WHERE id=?", (episodes[7],)).fetchone()
+            _promote_legacy_block(conn, episode)
+            conn.execute(
+                """INSERT INTO audioletter_blocks
+                   (episode_id,sort_order,block_type,title,body,created_at,updated_at)
+                   VALUES(?,2,'info','마지막 정보','마지막 콘텐츠 내용',?,?)""",
+                (episodes[7], utcnow(), utcnow()),
+            )
         url = f"/audioletters/{episodes[7]}"
         before = self.client.get(url).get_data(as_text=True)
         self.assertIn("/quiz?episode=R041", before)
+        self.assertIn("이해 테스트 하기 →", before)
+        self.assertIn("이번 회차를 다 들으셨나요?", before)
+        self.assertIn("들은 내용을 가볍게 확인하거나 의견을 남겨보세요.", before)
+        self.assertLess(before.index("마지막 콘텐츠 내용"), before.index('aria-label="회차 참여"'))
+        self.assertLess(before.index('aria-label="회차 참여"'), before.index('aria-label="청취 안내"'))
+        self.assertLess(before.index('aria-label="청취 안내"'), before.index('aria-label="콘텐츠 이용 안내"'))
+        self.assertNotIn("이해 테스트와 의견 남기기는 해당 회차에 연결된 경우", before)
         self.assertNotIn("/episode/R041/feedback", before)
+        self.assertNotIn("의견 남기기 →", before)
+        self.assertEqual(self.client.get("/quiz?episode=R041").status_code, 200)
         with transaction(self.db_path) as conn:
             conn.execute("""INSERT INTO participation
                          (subscriber_id,episode_id,first_completed_at,source)
                          VALUES(?,?,?,'app')""", (subscriber_id, quiz["id"], utcnow()))
         after = self.client.get(url).get_data(as_text=True)
         self.assertIn("/episode/R041/feedback", after)
+        self.assertIn("의견 남기기 →", after)
+        self.assertEqual(self.client.get("/episode/R041/feedback").status_code, 200)
         with transaction(self.db_path) as conn:
             conn.execute("UPDATE episodes SET is_published=0 WHERE id=?", (quiz["id"],))
-        self.assertNotIn("/quiz?episode=R041", self.client.get(url).get_data(as_text=True))
+        hidden = self.client.get(url).get_data(as_text=True)
+        self.assertNotIn("/quiz?episode=R041", hidden)
+        self.assertNotIn('aria-label="회차 참여"', hidden)
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE episodes SET is_published=1 WHERE id=?", (quiz["id"],))
+            conn.execute("DELETE FROM questions WHERE episode_id=?", (quiz["id"],))
+        no_questions = self.client.get(url).get_data(as_text=True)
+        self.assertNotIn('aria-label="회차 참여"', no_questions)
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE audioletter_episodes SET quiz_episode_code=NULL WHERE id=?", (episodes[7],))
+        self.assertNotIn('aria-label="회차 참여"', self.client.get(url).get_data(as_text=True))
+        css = (ROOT / "static/style.css").read_text()
+        self.assertIn(".audioletter-participation-actions{display:flex;gap:10px;flex-wrap:wrap}", css)
+        self.assertIn("@media(max-width:620px){.audioletter-participation-actions", css)
 
 
 if __name__ == "__main__":
