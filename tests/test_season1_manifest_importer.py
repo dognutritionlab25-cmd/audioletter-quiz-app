@@ -62,6 +62,29 @@ class Season1ManifestImporterTests(unittest.TestCase):
         self.assertEqual(result["episodes"][6]["code"], "S1-07")
         self.assertEqual(result["episodes"][6]["blocks"], ["CREATE", "CREATE", "CREATE", "CREATE"])
 
+    def _seed_production_s1_07_reference(self):
+        with transaction(self.db_path) as conn:
+            now = utcnow()
+            episode_id = conn.execute(
+                """INSERT INTO audioletter_episodes
+                   (sequence,season,season_episode,title,audio_storage_key,transcript,quiz_episode_code,is_published,created_at,updated_at)
+                   VALUES(7,1,7,'Production S1-07 reference',NULL,'','R007',1,?,?)""",
+                (now, now),
+            ).lastrowid
+            for order, block_type, title, body, key, transcript in [
+                (1, "audio", "reference greeting", "", "reference/s1-07-01.mp3", "reference transcript 1"),
+                (2, "audio", "reference tip", "", "reference/s1-07-02.mp3", "reference transcript 2"),
+                (3, "info", "reference info", "reference info body", None, ""),
+                (4, "audio", "reference nutrition", "", "reference/s1-07-03.mp3", "reference transcript 3"),
+            ]:
+                conn.execute(
+                    """INSERT INTO audioletter_blocks
+                       (episode_id,sort_order,block_type,title,body,audio_storage_key,transcript,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (episode_id, order, block_type, title, body, key, transcript, now, now),
+                )
+        return episode_id
+
     def test_cli_dry_run_does_not_initialize_or_write_database(self):
         before = Path(self.db_path).read_bytes()
         completed = subprocess.run(
@@ -74,29 +97,53 @@ class Season1ManifestImporterTests(unittest.TestCase):
 
     def test_apply_is_idempotent_and_followup_dry_run_is_unchanged(self):
         first = apply_manifest(self.db_path, MANIFEST)
-        self.assertEqual(first, {"mode": "apply", "created": 42, "updated": 0, "unchanged": 0})
+        self.assertEqual(first, {"mode": "apply", "created": 42, "updated": 0, "unchanged": 0, "preserved": 0})
         second = apply_manifest(self.db_path, MANIFEST)
-        self.assertEqual(second, {"mode": "apply", "created": 0, "updated": 0, "unchanged": 42})
+        self.assertEqual(second, {"mode": "apply", "created": 0, "updated": 0, "unchanged": 41, "preserved": 1})
         result = dry_run(self.db_path, MANIFEST)
-        self.assertEqual(result["UNCHANGED episodes"], 42)
+        self.assertEqual(result["UNCHANGED episodes"], 41)
+        self.assertEqual(result["PRESERVE_EXISTING episodes"], 1)
         conn = connect(self.db_path)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM audioletter_episodes").fetchone()[0], 42)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM audioletter_blocks").fetchone()[0], 122)
         conn.close()
 
-    def test_existing_populated_s1_07_is_conflict_and_never_overwritten(self):
-        apply_manifest(self.db_path, MANIFEST)
-        with transaction(self.db_path) as conn:
-            conn.execute("UPDATE audioletter_episodes SET title='수동 S1-07' WHERE sequence=7")
+    def test_existing_s1_07_reference_is_preserved_without_any_write(self):
+        episode_id = self._seed_production_s1_07_reference()
+        conn = connect(self.db_path)
+        before_episode = tuple(conn.execute("SELECT * FROM audioletter_episodes WHERE id=?", (episode_id,)).fetchone())
+        before_blocks = [tuple(row) for row in conn.execute(
+            "SELECT * FROM audioletter_blocks WHERE episode_id=? ORDER BY sort_order", (episode_id,)
+        ).fetchall()]
+        conn.close()
         result = dry_run(self.db_path, MANIFEST)
         s107 = result["episodes"][6]
-        self.assertEqual(s107["episode"], "CONFLICT")
-        self.assertIn("episode metadata differs", s107["reasons"])
+        self.assertEqual(result["CREATE episodes"], 41)
+        self.assertEqual(result["CONFLICT episodes"], 0)
+        self.assertEqual(result["PRESERVE_EXISTING episodes"], 1)
+        self.assertEqual(s107["episode"], "PRESERVE_EXISTING")
+        self.assertEqual(s107["blocks"], ["PRESERVE_EXISTING"] * 4)
+        self.assertIn("preserved by migration policy", s107["reasons"][0])
+        applied = apply_manifest(self.db_path, MANIFEST)
+        self.assertEqual(applied["created"], 41)
+        self.assertEqual(applied["preserved"], 1)
+        conn = connect(self.db_path)
+        self.assertEqual(tuple(conn.execute("SELECT * FROM audioletter_episodes WHERE id=?", (episode_id,)).fetchone()), before_episode)
+        self.assertEqual([tuple(row) for row in conn.execute(
+            "SELECT * FROM audioletter_blocks WHERE episode_id=? ORDER BY sort_order", (episode_id,)
+        ).fetchall()], before_blocks)
+        conn.close()
+
+    def test_non_s1_07_conflict_still_blocks_apply(self):
+        apply_manifest(self.db_path, MANIFEST)
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE audioletter_episodes SET title='unexpected S1-08 change' WHERE sequence=8")
+        result = dry_run(self.db_path, MANIFEST)
+        self.assertEqual(result["episodes"][6]["episode"], "PRESERVE_EXISTING")
+        self.assertEqual(result["episodes"][7]["episode"], "CONFLICT")
+        self.assertEqual(result["CONFLICT episodes"], 1)
         with self.assertRaises(ManifestValidationError):
             apply_manifest(self.db_path, MANIFEST)
-        conn = connect(self.db_path)
-        self.assertEqual(conn.execute("SELECT title FROM audioletter_episodes WHERE sequence=7").fetchone()[0], "수동 S1-07")
-        conn.close()
 
     def test_only_empty_unpublished_draft_can_update(self):
         with transaction(self.db_path) as conn:
