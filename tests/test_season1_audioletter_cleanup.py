@@ -130,7 +130,7 @@ class Season1AudioletterCleanupTests(unittest.TestCase):
     def test_ambiguous_indentation_inline_empty_block_and_unknown_tag_require_review(self):
         episode_id = self._episode()
         self._block(episode_id, 1, "audio", key="audioletters/season1/s1-01-01.mp3",
-                    transcript="\t한 줄뿐인 들여쓰기")
+                    transcript="\tplain one-line indentation")
         self._block(episode_id, 2, "info", body="문장<empty-block>다음 문장")
         self._block(episode_id, 3, "info", body="<unknown-export>원문</unknown-export>")
         report = scan_cleanup(self.db_path)
@@ -209,7 +209,7 @@ class Season1AudioletterCleanupTests(unittest.TestCase):
 
     def test_json_report_contains_full_audioletter_findings_but_console_keeps_previews(self):
         episode_id = self._episode()
-        source = "앞 문장<br>\t한 줄뿐인 들여쓰기"
+        source = "앞 문장<br>\n\tplain one-line indentation"
         self._block(episode_id, 1, "audio", transcript=source, key="audioletters/season1/s1-01-01.mp3")
         report_path = Path(self.temp.name) / "season1-report.json"
         before = Path(self.db_path).read_bytes()
@@ -222,7 +222,7 @@ class Season1AudioletterCleanupTests(unittest.TestCase):
         self.assertEqual(saved["summary"]["scanned_episodes"], 1)
         finding = saved["findings"][0]
         self.assertEqual(finding["before_value"], source)
-        self.assertEqual(finding["proposed_after_value"], "앞 문장\n\t한 줄뿐인 들여쓰기")
+        self.assertEqual(finding["proposed_after_value"], "앞 문장\n\n\tplain one-line indentation")
         self.assertIn("LITERAL_BR", finding["safe_patterns"])
         self.assertIn("AMBIGUOUS_INDENTATION", finding["review_patterns"])
         self.assertEqual(finding["classification"], REVIEW_REQUIRED)
@@ -255,6 +255,89 @@ class Season1AudioletterCleanupTests(unittest.TestCase):
         rendered = str(render_audioletter_text(self._field(block_id, "transcript")))
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
         self.assertNotIn("<script>alert(1)</script>", rendered)
+
+    def test_uniform_tabbed_korean_prose_and_list_root_are_export_indentation(self):
+        episode_id = self._episode()
+        block_id = self._block(
+            episode_id, 1, "audio", key="audioletters/season1/s1-01-01.mp3",
+            transcript="\t첫 문장\n\t- 참고자료\n\t둘째 문장",
+        )
+        report = scan_cleanup(self.db_path)
+        self.assertEqual(report["SAFE_AUTO_FIX"], 1)
+        self.assertIn("TAB_INDENTATION", report["findings"][0]["safe_patterns"])
+        apply_cleanup(self.db_path)
+        self.assertEqual(self._field(block_id, "transcript"), "첫 문장\n- 참고자료\n둘째 문장")
+
+    def test_standalone_empty_block_slash_variants_are_removed_without_touching_inline_text(self):
+        episode_id = self._episode()
+        safe = self._block(episode_id, 1, "audio", key="audioletters/season1/s1-01-01.mp3",
+                           transcript="앞\n<empty-block/>\n&lt;empty-block/&gt;\n뒤")
+        self._block(episode_id, 2, "info", body="문장<empty-block/>다음 문장")
+        report = scan_cleanup(self.db_path)
+        self.assertEqual(report["SAFE_AUTO_FIX"], 1)
+        self.assertEqual(report["REVIEW_REQUIRED"], 1)
+        apply_cleanup(self.db_path) if report["REVIEW_REQUIRED"] == 0 else None
+        # The review guard prevents a batch apply; prove the safe field's proposal is content-preserving.
+        safe_finding = next(item for item in report["findings"] if item["sort_order"] == 1)
+        self.assertEqual(safe_finding["proposed_after_preview"], "앞\\n\\n\\n뒤")
+        self.assertEqual(self._field(safe, "transcript"), "앞\n<empty-block/>\n&lt;empty-block/&gt;\n뒤")
+
+    def test_synced_block_reference_removes_only_complete_wrapper_and_preserves_inner_text(self):
+        episode_id = self._episode()
+        block_id = self._block(
+            episode_id, 1, "audio", key="audioletters/season1/s1-01-01.mp3",
+            transcript='<synced_block_reference url="https://example.test/source">\n실제 transcript **강조**\n</synced_block_reference>',
+        )
+        report = scan_cleanup(self.db_path)
+        finding = report["findings"][0]
+        self.assertEqual(finding["classification"], SAFE_AUTO_FIX)
+        self.assertIn("NOTION_SYNCED_BLOCK_REFERENCE_WRAPPER", finding["safe_patterns"])
+        apply_cleanup(self.db_path)
+        self.assertEqual(self._field(block_id, "transcript"), "실제 transcript **강조**\n")
+
+    def test_malformed_synced_block_reference_and_unknown_span_stay_review_required(self):
+        episode_id = self._episode()
+        self._block(episode_id, 1, "audio", key="audioletters/season1/s1-01-01.mp3",
+                    transcript='<synced_block_reference url="https://example.test">\n원문')
+        self._block(episode_id, 2, "info", body='<span class="unknown">원문</span>')
+        report = scan_cleanup(self.db_path)
+        self.assertEqual(report["REVIEW_REQUIRED"], 2)
+        self.assertTrue(all(item["classification"] == REVIEW_REQUIRED for item in report["findings"]))
+
+    def test_exact_underline_span_preserves_markdown_link_and_unknown_span_is_not_unwrapped(self):
+        episode_id = self._episode()
+        block_id = self._block(
+            episode_id, 1, "audio", key="audioletters/season1/s1-01-01.mp3",
+            transcript='<span underline="true">[https://example.test](https://example.test)</span>',
+        )
+        report = scan_cleanup(self.db_path)
+        self.assertEqual(report["SAFE_AUTO_FIX"], 1)
+        self.assertIn("NOTION_UNDERLINE_SPAN_WRAPPER", report["findings"][0]["safe_patterns"])
+        apply_cleanup(self.db_path)
+        self.assertEqual(self._field(block_id, "transcript"), "[https://example.test](https://example.test)")
+
+    def test_terminal_export_backtick_requires_empty_block_context_and_preserves_inline_code(self):
+        episode_id = self._episode()
+        safe = self._block(episode_id, 1, "audio", key="audioletters/season1/s1-01-01.mp3",
+                           transcript="본문\n<empty-block/>\n<br>\\`")
+        normal = self._block(episode_id, 2, "info", body="정상 `inline code`")
+        report = scan_cleanup(self.db_path)
+        self.assertEqual(report["SAFE_AUTO_FIX"], 1)
+        self.assertEqual(report["REVIEW_REQUIRED"], 0)
+        self.assertEqual(report["PRESERVED_MARKDOWN"], 0)
+        apply_cleanup(self.db_path)
+        self.assertEqual(self._field(safe, "transcript"), "본문\n\n\n")
+        self.assertEqual(self._field(normal, "body"), "정상 `inline code`")
+
+    def test_code_quote_and_ascii_table_indentation_remain_review_required(self):
+        episode_id = self._episode()
+        self._block(episode_id, 1, "audio", key="audioletters/season1/s1-01-01.mp3", transcript="\t```\n\tprint('x')\n\t```")
+        self._block(episode_id, 2, "info", body="\t> 인용문\n\t다음 문장")
+        self._block(episode_id, 3, "info", body="\t| A | B |\n\t| - | - |")
+        report = scan_cleanup(self.db_path)
+        self.assertEqual(report["REVIEW_REQUIRED"], 3)
+        with self.assertRaises(CleanupValidationError):
+            apply_cleanup(self.db_path)
 
 
 if __name__ == "__main__":
