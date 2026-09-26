@@ -6,6 +6,7 @@ from app import create_app, seed_demo
 from db import init_db
 from importers import import_google_form_payload, migrate_anonymous_feedback, migrate_historical_responses
 from season1_manifest_importer import apply_manifest, dry_run
+from season1_audioletter_cleanup import apply_cleanup, scan_cleanup
 
 
 def main():
@@ -33,6 +34,15 @@ def main():
                          help="Future use only: write after explicit confirmation")
     season1.add_argument("--confirm-apply", action="store_true",
                          help="Required together with --apply")
+    cleanup = sub.add_parser(
+        "season1-audioletter-cleanup",
+        help="Read-only Season 1 markup/Notion residue scan by default",
+    )
+    cleanup.add_argument("--db", default=os.environ.get("DB_PATH", "quiz.db"))
+    cleanup.add_argument("--apply", action="store_true",
+                         help="Future use only: write after explicit confirmation")
+    cleanup.add_argument("--confirm-apply", action="store_true",
+                         help="Required together with --apply")
     args = parser.parse_args()
     if args.command == "season1-audioletter-import":
         if args.apply:
@@ -43,6 +53,17 @@ def main():
             # Do not call create_app() here: it initializes SQLite and would
             # violate the importer's no-write dry-run contract.
             result = dry_run(args.db, args.manifest)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if args.command == "season1-audioletter-cleanup":
+        if args.apply:
+            if not args.confirm_apply:
+                parser.error("--apply requires --confirm-apply")
+            result = apply_cleanup(args.db)
+        else:
+            # Do not call create_app(): its database initialization would violate
+            # the cleanup scanner's read-only dry-run contract.
+            result = scan_cleanup(args.db)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
