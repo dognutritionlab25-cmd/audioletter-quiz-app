@@ -36,3 +36,11 @@
 .site-footer-home .footer-links small{font-size:inherit}
 .site-footer-minimal{border:0;align-items:center}
 @media(max-width:620px){.portal-home-links{grid-template-columns:1fr}.portal-hero{padding:8px 0 22px}.portal-hero br{display:none}.site-footer-home{font-size:.71rem}.site-footer-home .footer-links{justify-content:flex-start}}
+
+/* Next step appears immediately after the last audioletter block. */
+.audioletter-participation{border-color:#d7e5c7}
+.audioletter-participation h2{font-size:1.05rem;margin:0 0 5px}
+.audioletter-participation p{color:var(--muted);font-size:.9rem;margin:0 0 14px}
+.audioletter-participation-actions{display:flex;gap:10px;flex-wrap:wrap}
+.audioletter-participation-actions .button-link{font-size:.9rem;padding:10px 14px}
+@media(max-width:620px){.audioletter-participation-actions{flex-direction:column;align-items:stretch}}
