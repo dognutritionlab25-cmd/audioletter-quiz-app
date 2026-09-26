@@ -19,6 +19,8 @@ BUCKET_PREFIX = "audioletters/season1/"
 BUCKET_KEY_RE = re.compile(r"^audioletters/season1/s1-(\d{2})-(\d{2})\.mp3$")
 EPISODE_RE = re.compile(r"^## (S1-\d{2})\s*$", re.MULTILINE)
 BLOCK_RE = re.compile(r"^### Block (\d+)\s*$", re.MULTILINE)
+PRESERVED_REFERENCE_SEQUENCE = 7
+PRESERVE_STATUS = "PRESERVE_EXISTING"
 
 
 class ManifestValidationError(ValueError):
@@ -211,6 +213,15 @@ def compare_episode(conn: sqlite3.Connection, desired: ManifestEpisode) -> dict[
     row = conn.execute("SELECT * FROM audioletter_episodes WHERE sequence=?", (desired.sequence,)).fetchone()
     if row is None:
         return {"episode": "CREATE", "blocks": ["CREATE" for _ in desired.blocks], "reasons": []}
+    # S1-07 is the independently verified Production reference episode.  Its
+    # actual stored representation is intentionally authoritative for this
+    # migration; do not compare it for reconciliation and never write it.
+    if desired.sequence == PRESERVED_REFERENCE_SEQUENCE:
+        return {
+            "episode": PRESERVE_STATUS,
+            "blocks": [PRESERVE_STATUS for _ in desired.blocks],
+            "reasons": ["existing Production S1-07 reference episode is preserved by migration policy"],
+        }
     blocks = _db_blocks(conn, row["id"])
     same_metadata = (
         row["season"] == desired.season and row["season_episode"] == desired.season_episode
@@ -261,6 +272,7 @@ def dry_run(db_path: str, manifest_path: str | Path) -> dict[str, Any]:
         "manifest_info_blocks": sum(block.block_type == "info" for episode in episodes for block in episode.blocks),
         "CREATE episodes": counts["CREATE"], "UPDATE episodes": counts["UPDATE"],
         "UNCHANGED episodes": counts["UNCHANGED"], "CONFLICT episodes": counts["CONFLICT"],
+        "PRESERVE_EXISTING episodes": counts[PRESERVE_STATUS],
         "episodes": result_rows,
     }
 
@@ -288,8 +300,13 @@ def apply_manifest(db_path: str, manifest_path: str | Path) -> dict[str, Any]:
         ).fetchone()]
         if missing_quiz or any(item["episode"] == "CONFLICT" for item in comparisons):
             raise ManifestValidationError("Apply blocked: existing content conflict or missing Quiz reference")
-        created = updated = unchanged = 0
+        created = updated = unchanged = preserved = 0
         for episode, comparison in zip(episodes, comparisons):
+            if comparison["episode"] == PRESERVE_STATUS:
+                # This branch intentionally performs no read-modify-write on
+                # the episode or its blocks, including timestamps.
+                preserved += 1
+                continue
             if comparison["episode"] == "UNCHANGED":
                 unchanged += 1
                 continue
@@ -313,4 +330,5 @@ def apply_manifest(db_path: str, manifest_path: str | Path) -> dict[str, Any]:
                 )
                 _insert_blocks(conn, row["id"], episode, now)
                 updated += 1
-    return {"mode": "apply", "created": created, "updated": updated, "unchanged": unchanged}
+    return {"mode": "apply", "created": created, "updated": updated,
+            "unchanged": unchanged, "preserved": preserved}
