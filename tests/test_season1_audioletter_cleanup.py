@@ -103,6 +103,19 @@ class Season1AudioletterCleanupTests(unittest.TestCase):
         self.assertEqual(self._field(tab_block, "transcript"), "첫 문장\n둘째 문장")
         self.assertEqual(self._field(space_block, "body"), "첫 안내\n둘째 안내")
 
+    def test_repeated_prose_indentation_is_safe_even_when_other_paragraphs_are_not_indented(self):
+        episode_id = self._episode()
+        block_id = self._block(
+            episode_id, 1, "audio", key="audioletters/season1/s1-01-01.mp3",
+            transcript="앞 문단\n\t첫 번째 들여쓰기 문장\n\t둘째 들여쓰기 문장\n마지막 문단",
+        )
+        report = scan_cleanup(self.db_path)
+        self.assertEqual(report["SAFE_AUTO_FIX"], 1)
+        self.assertIn("TAB_INDENTATION", report["findings"][0]["safe_patterns"])
+        apply_cleanup(self.db_path)
+        self.assertEqual(self._field(block_id, "transcript"),
+                         "앞 문단\n첫 번째 들여쓰기 문장\n둘째 들여쓰기 문장\n마지막 문단")
+
     def test_normal_markdown_is_preserved_and_not_an_apply_blocker(self):
         episode_id = self._episode()
         self._block(episode_id, 1, "audio", title="**강조 제목**", transcript="***National Research Council (NRC)***",
@@ -193,6 +206,44 @@ class Season1AudioletterCleanupTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("--apply requires --confirm-apply", refused.stderr)
         self.assertEqual(Path(self.db_path).read_bytes(), before)
+
+    def test_json_report_contains_full_audioletter_findings_but_console_keeps_previews(self):
+        episode_id = self._episode()
+        source = "앞 문장<br>\t한 줄뿐인 들여쓰기"
+        self._block(episode_id, 1, "audio", transcript=source, key="audioletters/season1/s1-01-01.mp3")
+        report_path = Path(self.temp.name) / "season1-report.json"
+        before = Path(self.db_path).read_bytes()
+        console = scan_cleanup(self.db_path, report_json=report_path)
+        self.assertEqual(Path(self.db_path).read_bytes(), before)
+        self.assertEqual(console["REVIEW_REQUIRED"], 1)
+        self.assertNotIn("before_value", console["findings"][0])
+        self.assertIn("before_preview", console["findings"][0])
+        saved = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["summary"]["scanned_episodes"], 1)
+        finding = saved["findings"][0]
+        self.assertEqual(finding["before_value"], source)
+        self.assertEqual(finding["proposed_after_value"], "앞 문장\n\t한 줄뿐인 들여쓰기")
+        self.assertIn("LITERAL_BR", finding["safe_patterns"])
+        self.assertIn("AMBIGUOUS_INDENTATION", finding["review_patterns"])
+        self.assertEqual(finding["classification"], REVIEW_REQUIRED)
+        serialized = report_path.read_text(encoding="utf-8")
+        self.assertNotIn("subscriber", serialized.lower())
+        self.assertNotIn("email", serialized.lower())
+        self.assertEqual(Path(self.db_path).read_bytes(), before)
+
+    def test_cli_writes_full_json_report_without_db_write(self):
+        episode_id = self._episode()
+        self._block(episode_id, 1, "audio", transcript="a&lt;br&gt;b", key="audioletters/season1/s1-01-01.mp3")
+        report_path = Path(self.temp.name) / "report.json"
+        before = Path(self.db_path).read_bytes()
+        completed = subprocess.run(
+            [sys.executable, "manage.py", "season1-audioletter-cleanup", "--db", self.db_path,
+             "--report-json", str(report_path)],
+            cwd=ROOT, check=True, text=True, capture_output=True,
+        )
+        self.assertEqual(Path(self.db_path).read_bytes(), before)
+        self.assertEqual(json.loads(completed.stdout)["report_json"], str(report_path))
+        self.assertEqual(json.loads(report_path.read_text(encoding="utf-8"))["findings"][0]["before_value"], "a&lt;br&gt;b")
 
     def test_safe_cleanup_does_not_regress_xss_protection(self):
         episode_id = self._episode()
