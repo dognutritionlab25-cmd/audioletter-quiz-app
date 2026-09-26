@@ -22,13 +22,15 @@ The report keeps `safe_patterns` and `review_patterns` separately. A field can s
 ## What may be fixed automatically
 
 - encoded or literal `<br>` variants become a newline;
-- standalone `<empty-block>` variants are removed without changing prose;
-- standalone `<synced_block ...>` wrapper lines are removed;
-- repeated leading tabs or four-space prefixes on ordinary prose lines are removed, including mixed paragraphs where only the affected prose lines were indented.
+- standalone `<empty-block>` / `<empty-block/>` variants are removed without changing prose;
+- complete, standalone `<synced_block ...>` and `<synced_block_reference url="...">` wrapper pairs are removed while their inner text is retained exactly;
+- the exact Notion wrapper `<span underline="true">CONTENT</span>` is unwrapped while `CONTENT` (including Markdown links) is retained exactly;
+- a terminal standalone export ``\``` is removed only when it follows removable empty-block residue;
+- a common leading-tab prefix on a prose document is removed (deeper relative indentation is retained), as are repeated leading tabs or four-space prefixes on ordinary prose lines.
 
 Markdown emphasis such as `**bold**` and `***bold italic***` is never removed. It is reported as `PRESERVED_MARKDOWN` unless another safe normalization (such as indentation) is needed to let the renderer interpret it.
 
-Unknown tag-like residue, inline wrappers/empty-blocks, mixed indentation, one-line indentation, lists/tables, and code-like indentation are `REVIEW_REQUIRED` and block apply.
+Unknown tag-like residue, malformed or inline wrappers/empty-blocks, unknown span attributes, mixed indentation, non-prose one-line indentation, quote/table/code indentation, and standalone backticks without the empty-block export context are `REVIEW_REQUIRED` and block apply.
 
 ## Future apply only
 
