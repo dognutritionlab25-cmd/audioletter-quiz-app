@@ -24,16 +24,28 @@ PRESERVED_MARKDOWN = "PRESERVED_MARKDOWN"
 
 ENCODED_BR_RE = re.compile(r"&lt;\s*br\s*/?\s*&gt;", re.IGNORECASE)
 LITERAL_BR_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
-ENCODED_EMPTY_BLOCK_RE = re.compile(r"&lt;\s*empty-block\s*&gt;", re.IGNORECASE)
-LITERAL_EMPTY_BLOCK_RE = re.compile(r"<\s*empty-block\s*>", re.IGNORECASE)
-SYNCED_BLOCK_RE = re.compile(r"<\s*/?\s*synced_block(?:\s+[^<>]*)?\s*>", re.IGNORECASE)
+ENCODED_EMPTY_BLOCK_RE = re.compile(r"&lt;\s*empty-block\s*/?\s*&gt;", re.IGNORECASE)
+LITERAL_EMPTY_BLOCK_RE = re.compile(r"<\s*empty-block\s*/?\s*>", re.IGNORECASE)
+SYNCED_BLOCK_OPEN_RE = re.compile(r"<\s*synced_block(?:\s+[^<>]*)?\s*>", re.IGNORECASE)
+SYNCED_BLOCK_CLOSE_RE = re.compile(r"<\s*/\s*synced_block\s*>", re.IGNORECASE)
+SYNCED_BLOCK_REFERENCE_OPEN_RE = re.compile(
+    r"<\s*synced_block_reference\s+url=(?:\"[^\"]*\"|'[^']*')\s*>", re.IGNORECASE
+)
+SYNCED_BLOCK_REFERENCE_CLOSE_RE = re.compile(r"<\s*/\s*synced_block_reference\s*>", re.IGNORECASE)
+SYNCED_BLOCK_REFERENCE_TAG_RE = re.compile(r"<\s*/?\s*synced_block_reference\b[^<>]*>", re.IGNORECASE)
+UNDERLINE_SPAN_OPEN_RE = re.compile(r"<\s*span\s+underline=(?:\"true\"|'true')\s*>", re.IGNORECASE)
+UNDERLINE_SPAN_CLOSE_RE = re.compile(r"<\s*/\s*span\s*>", re.IGNORECASE)
+SPAN_TAG_RE = re.compile(r"<\s*/?\s*span\b[^<>]*>", re.IGNORECASE)
 HTML_LIKE_RE = re.compile(r"(?:<|&lt;)\s*/?\s*[a-z][\w:-]*(?:\s+[^<>]*?)?(?:>|&gt;)", re.IGNORECASE)
 MARKDOWN_EMPHASIS_RE = re.compile(r"(?<!\\)(?:\*\*\*?|__?)(?=\S)")
 CODE_LIKE_RE = re.compile(
-    r"(?im)^\s*(?:```|def\s|class\s|SELECT\s|INSERT\s|UPDATE\s|DELETE\s|\{|\}|//|#include|\||[-=]{3,})"
+    r"(?im)^\s*(?:```|def\s|class\s|SELECT\s|INSERT\s|UPDATE\s|DELETE\s|\{|\}|//|#include)"
 )
 INDENTED_LIST_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|>)")
 CODE_SYMBOL_RE = re.compile(r"(?:=>|==|!=|\{.*\}|;|\|)")
+ASCII_TABLE_RE = re.compile(r"(?m)^\s*\|.*\|\s*$")
+BLOCK_QUOTE_RE = re.compile(r"(?m)^\s*>\s?")
+TRAILING_EXPORT_BACKTICK_RE = re.compile(r"(?m)^[ \t]*(?:\\?`)[ \t]*\Z")
 
 
 class CleanupValidationError(ValueError):
@@ -92,9 +104,71 @@ def _remove_standalone_lines(value: str, pattern: re.Pattern[str], replacement: 
     )
 
 
+def _unwrap_matched_line_wrapper(
+    value: str, open_pattern: re.Pattern[str], close_pattern: re.Pattern[str]
+) -> tuple[bool, str | None]:
+    """Remove only complete, line-only wrapper pairs, never their contents."""
+    if not open_pattern.search(value) and not close_pattern.search(value):
+        return False, value
+    lines = value.splitlines(keepends=True)
+    depth = 0
+    result: list[str] = []
+    for line in lines:
+        raw = line.rstrip("\r\n")
+        if open_pattern.fullmatch(raw.strip()):
+            depth += 1
+            continue
+        if close_pattern.fullmatch(raw.strip()):
+            if depth == 0:
+                return True, None
+            depth -= 1
+            continue
+        # A wrapper token sharing a line with content is not safely structural.
+        if open_pattern.search(raw) or close_pattern.search(raw):
+            return True, None
+        result.append(line)
+    if depth:
+        return True, None
+    return True, "".join(result)
+
+
+def _unwrap_underline_spans(value: str) -> tuple[bool, str | None]:
+    """Strip the exact Notion underline wrapper while retaining its inner text."""
+    span_tags = list(SPAN_TAG_RE.finditer(value))
+    if not span_tags:
+        return False, value
+    output: list[str] = []
+    cursor = 0
+    depth = 0
+    for tag in span_tags:
+        output.append(value[cursor:tag.start()])
+        token = tag.group(0)
+        if UNDERLINE_SPAN_OPEN_RE.fullmatch(token):
+            if depth:
+                return True, None
+            depth = 1
+        elif UNDERLINE_SPAN_CLOSE_RE.fullmatch(token):
+            if depth != 1:
+                return True, None
+            depth = 0
+        else:
+            return True, None
+        cursor = tag.end()
+    output.append(value[cursor:])
+    if depth:
+        return True, None
+    return True, "".join(output)
+
+
 def _prose_indentation_line(line: str) -> bool:
     stripped = line.strip()
     return bool(stripped and not INDENTED_LIST_RE.match(line) and not CODE_SYMBOL_RE.search(stripped))
+
+
+def _single_tab_prose_line(line: str) -> bool:
+    """A lone leading tab is safe only for clearly natural-language prose."""
+    stripped = line.lstrip("\t").strip()
+    return _prose_indentation_line(line) and bool(re.search(r"[가-힣]", stripped))
 
 
 def _indentation_action(value: str) -> tuple[str | None, str | None]:
@@ -108,18 +182,45 @@ def _indentation_action(value: str) -> tuple[str | None, str | None]:
     if not has_tab and not has_spaces:
         return None, None
     indented = [line for line in content if line.startswith("\t") or line.startswith("    ")]
-    if CODE_LIKE_RE.search(value) or any(not _prose_indentation_line(line) for line in indented):
+    if CODE_LIKE_RE.search(value) or ASCII_TABLE_RE.search(value) or BLOCK_QUOTE_RE.search(value):
         return "AMBIGUOUS_INDENTATION", None
-    # A single indented line has no reliable evidence that it is export residue.
+    # A uniform leading tab across a prose document is a Notion export root
+    # indentation.  Removing only the common prefix keeps any deeper list
+    # indentation intact.  Pure list/quote/table content remains review-only.
+    if has_tab and not has_spaces and all(line.startswith("\t") for line in content):
+        prose_lines = [line for line in content if _prose_indentation_line(line)]
+        if prose_lines and (len(content) > 1 or all(_single_tab_prose_line(line) for line in prose_lines)):
+            common_tabs = min(len(line) - len(line.lstrip("\t")) for line in content)
+            return "TAB_INDENTATION", "".join(
+                line[common_tabs:] if line.startswith("\t") else line for line in lines
+            )
+        return "AMBIGUOUS_INDENTATION", None
+    if any(not _prose_indentation_line(line) for line in indented):
+        return "AMBIGUOUS_INDENTATION", None
+    # A single tabbed Korean prose line is a known Notion export shape.  Other
+    # one-line indentation remains ambiguous, especially four-space Markdown.
     if len(indented) < 2:
+        if has_tab and not has_spaces and all(line.startswith("\t") for line in indented) and all(
+            _single_tab_prose_line(line) for line in indented
+        ):
+            return "TAB_INDENTATION", "".join(line.lstrip("\t") if line.startswith("\t") else line for line in lines)
         return "AMBIGUOUS_INDENTATION", None
     if has_tab and not has_spaces and all(line.startswith("\t") for line in indented):
-        return "TAB_INDENTATION", "".join(line[1:] if line.startswith("\t") else line for line in lines)
+        return "TAB_INDENTATION", "".join(line.lstrip("\t") if line.startswith("\t") else line for line in lines)
     if not has_tab and all(line.startswith("    ") for line in indented):
         return "FOUR_SPACE_INDENTATION", "".join(
             line[4:] if line.startswith("    ") else line for line in lines
         )
     return "AMBIGUOUS_INDENTATION", None
+
+
+def _remove_trailing_export_backtick(value: str, *, had_empty_block: bool) -> tuple[bool, str]:
+    """Remove only the documented terminal export token following empty blocks."""
+    if not TRAILING_EXPORT_BACKTICK_RE.search(value):
+        return False, value
+    if not had_empty_block:
+        return False, value
+    return True, TRAILING_EXPORT_BACKTICK_RE.sub("", value)
 
 
 def _inspect_field(*, episode: sqlite3.Row, block: sqlite3.Row | None, table: str, field: str, value: str) -> CleanupFinding | None:
@@ -130,6 +231,20 @@ def _inspect_field(*, episode: sqlite3.Row, block: sqlite3.Row | None, table: st
     review_patterns: list[str] = []
     candidate = value
     review_notes: list[str] = []
+    had_empty_block = False
+
+    # Do this before converting inline <br> tokens: in Notion exports the
+    # common root tab belongs to the original physical line, not each later
+    # display line created by a break token.
+    indent_pattern, normalized = _indentation_action(candidate)
+    if indent_pattern:
+        patterns.append(indent_pattern)
+        if normalized is None:
+            review_notes.append("indentation may be intentional preformatted content")
+            review_patterns.append(indent_pattern)
+        else:
+            safe_patterns.append(indent_pattern)
+            candidate = normalized
 
     if ENCODED_BR_RE.search(candidate):
         patterns.append("ENCODED_BR")
@@ -145,33 +260,57 @@ def _inspect_field(*, episode: sqlite3.Row, block: sqlite3.Row | None, table: st
             patterns.append(label)
             if _standalone_matches(candidate, pattern):
                 safe_patterns.append(label)
+                had_empty_block = True
                 candidate = _remove_standalone_lines(candidate, pattern, "\n")
             else:
                 review_notes.append(f"{label} is not a standalone empty line")
                 review_patterns.append(label)
 
-    if SYNCED_BLOCK_RE.search(candidate):
+    seen, unwrapped = _unwrap_matched_line_wrapper(candidate, SYNCED_BLOCK_OPEN_RE, SYNCED_BLOCK_CLOSE_RE)
+    if seen:
         patterns.append("NOTION_SYNCED_BLOCK_WRAPPER")
-        if _standalone_matches(candidate, SYNCED_BLOCK_RE):
+        if unwrapped is not None:
             safe_patterns.append("NOTION_SYNCED_BLOCK_WRAPPER")
-            candidate = _remove_standalone_lines(candidate, SYNCED_BLOCK_RE, "")
+            candidate = unwrapped
         else:
-            review_notes.append("Notion synced_block wrapper is not standalone")
+            review_notes.append("Notion synced_block wrapper is malformed or not standalone")
             review_patterns.append("NOTION_SYNCED_BLOCK_WRAPPER")
 
-    indent_pattern, normalized = _indentation_action(candidate)
-    if indent_pattern:
-        patterns.append(indent_pattern)
-        if normalized is None:
-            review_notes.append("indentation may be intentional preformatted content")
-            review_patterns.append(indent_pattern)
+    seen, unwrapped = _unwrap_matched_line_wrapper(
+        candidate, SYNCED_BLOCK_REFERENCE_OPEN_RE, SYNCED_BLOCK_REFERENCE_CLOSE_RE
+    )
+    if seen or SYNCED_BLOCK_REFERENCE_TAG_RE.search(candidate):
+        patterns.append("NOTION_SYNCED_BLOCK_REFERENCE_WRAPPER")
+        if seen and unwrapped is not None:
+            safe_patterns.append("NOTION_SYNCED_BLOCK_REFERENCE_WRAPPER")
+            candidate = unwrapped
         else:
-            safe_patterns.append(indent_pattern)
-            candidate = normalized
+            review_notes.append("Notion synced_block_reference wrapper is malformed or not standalone")
+            review_patterns.append("NOTION_SYNCED_BLOCK_REFERENCE_WRAPPER")
+
+    seen, unwrapped = _unwrap_underline_spans(candidate)
+    if seen:
+        patterns.append("NOTION_UNDERLINE_SPAN_WRAPPER")
+        if unwrapped is not None:
+            safe_patterns.append("NOTION_UNDERLINE_SPAN_WRAPPER")
+            candidate = unwrapped
+        else:
+            review_notes.append("Notion underline span wrapper is malformed or has unsupported attributes")
+            review_patterns.append("NOTION_UNDERLINE_SPAN_WRAPPER")
+
+    removed_backtick, candidate = _remove_trailing_export_backtick(candidate, had_empty_block=had_empty_block)
+    if removed_backtick:
+        patterns.append("TRAILING_EXPORT_BACKTICK")
+        safe_patterns.append("TRAILING_EXPORT_BACKTICK")
+    elif TRAILING_EXPORT_BACKTICK_RE.search(candidate):
+        patterns.append("AMBIGUOUS_STANDALONE_BACKTICK")
+        review_notes.append("standalone backtick is not tied to empty-block export residue")
+        review_patterns.append("AMBIGUOUS_STANDALONE_BACKTICK")
 
     # Any unknown tag-like residue is intentionally never removed automatically.
     known_tags = (ENCODED_BR_RE, LITERAL_BR_RE, ENCODED_EMPTY_BLOCK_RE,
-                  LITERAL_EMPTY_BLOCK_RE, SYNCED_BLOCK_RE)
+                  LITERAL_EMPTY_BLOCK_RE, SYNCED_BLOCK_OPEN_RE, SYNCED_BLOCK_CLOSE_RE,
+                  SYNCED_BLOCK_REFERENCE_TAG_RE, SPAN_TAG_RE)
     if HTML_LIKE_RE.search(candidate) and not any(pattern.search(candidate) for pattern in known_tags):
         patterns.append("UNKNOWN_HTML_OR_EXPORT_ARTIFACT")
         review_notes.append("unknown HTML-like or export residue")
