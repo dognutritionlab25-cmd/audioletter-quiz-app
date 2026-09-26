@@ -2,10 +2,14 @@
 
 /* Audioletter content and compact customer portal business footer. */
 .audioletter-episode-heading{font-size:clamp(1.375rem,4.5vw,1.5rem);font-weight:650;line-height:1.4;color:var(--green-dark);margin:0 0 6px}
-.audioletter-markdown{white-space:normal}
+.audioletter-detail,.audioletter-detail>.audioletter-block{min-width:0}
+.audioletter-block>h2{overflow-wrap:anywhere}
+.audioletter-player{display:block;width:100%;max-width:100%}
+.audioletter-markdown{min-width:0;white-space:normal}
 .audioletter-markdown>:first-child{margin-top:0}
 .audioletter-markdown>:last-child{margin-bottom:0}
 .audioletter-markdown p{overflow-wrap:anywhere}
+.audioletter-markdown pre{max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere}
 .site-footer{display:flex;flex-direction:column;align-items:flex-start;gap:8px;line-height:1.55;color:var(--muted);font-size:.78rem;border-top:1px solid var(--line);padding-top:18px}
 .footer-business{overflow-wrap:anywhere}
 .footer-business strong{color:var(--ink);font-size:.88rem}
