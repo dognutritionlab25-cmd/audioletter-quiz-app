@@ -18,13 +18,17 @@
     {% endif %}
   </section>
   {% endfor %}
-  {% include 'audioletter_disclaimer.html' %}
   {% if quiz %}
-  <section class="card"><h2>이해테스트 · 피드백</h2>
-    <a class="secondary button-link" href="{{ url_for('quiz_entry', episode=quiz.code) }}">이해테스트 하기</a>
-    {% if participated %}<a class="secondary button-link" href="{{ url_for('feedback', code=quiz.code) }}">피드백 남기기</a>{% endif %}
+  <section class="card audioletter-participation" aria-label="회차 참여">
+    <h2>이번 회차를 다 들으셨나요?</h2>
+    <p>들은 내용을 가볍게 확인하거나 의견을 남겨보세요.</p>
+    <div class="audioletter-participation-actions">
+      <a class="primary button-link" href="{{ url_for('quiz_entry', episode=quiz.code) }}">이해 테스트 하기 →</a>
+      {% if participated %}<a class="secondary button-link" href="{{ url_for('feedback', code=quiz.code) }}">의견 남기기 →</a>{% endif %}
+    </div>
   </section>
   {% endif %}
+  {% include 'audioletter_disclaimer.html' %}
   <p><a class="secondary button-link" href="{{ url_for('audioletters.audioletter_list') }}">목록으로</a></p>
 </section>
 {% endblock %}
