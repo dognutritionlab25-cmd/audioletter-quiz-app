@@ -4067,6 +4067,30 @@ class QuizAppTest(unittest.TestCase):
             self.assertEqual(rows[1]["body"], source)
             self.assertEqual(rows[2]["transcript"], source)
 
+    def test_audioletter_block_title_renders_markdown_inline_and_keeps_long_pre_wrapped(self):
+        subscriber_id, episodes = self.audioletter_fixture()
+        episode_id = episodes[7]
+        title = "**R001-E 개의 종과 진화  ** <script>alert(7)</script>"
+        long_line = "가" * 400
+        with transaction(self.db_path) as conn:
+            conn.execute("UPDATE audioletter_episodes SET transcript=? WHERE id=?", (f"\t{long_line}", episode_id))
+            conn.execute(
+                "INSERT INTO audioletter_blocks (episode_id,sort_order,block_type,title,body,audio_storage_key,transcript,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (episode_id, 1, "audio", title, "", "audioletters/season1/s1-07-01.mp3", f"\t{long_line}", utcnow(), utcnow()),
+            )
+        with self.client.session_transaction() as state:
+            state["subscriber_id"] = subscriber_id
+        html = self.client.get(f"/audioletters/{episode_id}").get_data(as_text=True)
+        self.assertIn('<h2><strong>R001-E 개의 종과 진화</strong>', html)
+        self.assertNotIn("**R001-E", html)
+        self.assertNotIn("<script>alert(7)</script>", html)
+        self.assertIn("&lt;script&gt;alert(7)&lt;/script&gt;", html)
+        self.assertIn('class="audioletter-player"', html)
+        css = (ROOT / "static/style.css").read_text()
+        self.assertIn(".audioletter-detail,.audioletter-detail>.audioletter-block{min-width:0}", css)
+        self.assertIn(".audioletter-player{display:block;width:100%;max-width:100%}", css)
+        self.assertIn(".audioletter-markdown pre{max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere}", css)
+
     def test_audioletter_notion_info_markdown_header_footer_and_original_data(self):
         subscriber_id, episodes = self.audioletter_fixture()
         episode_id = episodes[7]
