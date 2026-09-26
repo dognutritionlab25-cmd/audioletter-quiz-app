@@ -43,6 +43,8 @@ def main():
                          help="Future use only: write after explicit confirmation")
     cleanup.add_argument("--confirm-apply", action="store_true",
                          help="Required together with --apply")
+    cleanup.add_argument("--report-json",
+                         help="Write a full-text JSON analysis report during read-only dry-run")
     args = parser.parse_args()
     if args.command == "season1-audioletter-import":
         if args.apply:
@@ -59,11 +61,13 @@ def main():
         if args.apply:
             if not args.confirm_apply:
                 parser.error("--apply requires --confirm-apply")
+            if args.report_json:
+                parser.error("--report-json is available only for read-only dry-run")
             result = apply_cleanup(args.db)
         else:
             # Do not call create_app(): its database initialization would violate
             # the cleanup scanner's read-only dry-run contract.
-            result = scan_cleanup(args.db)
+            result = scan_cleanup(args.db, report_json=args.report_json)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 

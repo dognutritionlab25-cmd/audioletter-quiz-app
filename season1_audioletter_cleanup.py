@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,8 +30,10 @@ SYNCED_BLOCK_RE = re.compile(r"<\s*/?\s*synced_block(?:\s+[^<>]*)?\s*>", re.IGNO
 HTML_LIKE_RE = re.compile(r"(?:<|&lt;)\s*/?\s*[a-z][\w:-]*(?:\s+[^<>]*?)?(?:>|&gt;)", re.IGNORECASE)
 MARKDOWN_EMPHASIS_RE = re.compile(r"(?<!\\)(?:\*\*\*?|__?)(?=\S)")
 CODE_LIKE_RE = re.compile(
-    r"(?m)^\s*(?:```|def\s|class\s|SELECT\s|INSERT\s|UPDATE\s|DELETE\s|\{|\}|//|#include)"
+    r"(?im)^\s*(?:```|def\s|class\s|SELECT\s|INSERT\s|UPDATE\s|DELETE\s|\{|\}|//|#include|\||[-=]{3,})"
 )
+INDENTED_LIST_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|>)")
+CODE_SYMBOL_RE = re.compile(r"(?:=>|==|!=|\{.*\}|;|\|)")
 
 
 class CleanupValidationError(ValueError):
@@ -47,6 +50,8 @@ class CleanupFinding:
     table: str
     field: str
     patterns: tuple[str, ...]
+    safe_patterns: tuple[str, ...]
+    review_patterns: tuple[str, ...]
     classification: str
     before: str
     after: str | None
@@ -87,8 +92,13 @@ def _remove_standalone_lines(value: str, pattern: re.Pattern[str], replacement: 
     )
 
 
+def _prose_indentation_line(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped and not INDENTED_LIST_RE.match(line) and not CODE_SYMBOL_RE.search(stripped))
+
+
 def _indentation_action(value: str) -> tuple[str | None, str | None]:
-    """Return (pattern, normalized text) only for clearly prose-wide indentation."""
+    """Normalize repeated prose indentation, but preserve possibly meaningful layout."""
     lines = value.splitlines(keepends=True)
     content = [line for line in lines if line.strip()]
     if not content:
@@ -97,13 +107,15 @@ def _indentation_action(value: str) -> tuple[str | None, str | None]:
     has_spaces = any(line.startswith("    ") for line in content)
     if not has_tab and not has_spaces:
         return None, None
-    if CODE_LIKE_RE.search(value):
+    indented = [line for line in content if line.startswith("\t") or line.startswith("    ")]
+    if CODE_LIKE_RE.search(value) or any(not _prose_indentation_line(line) for line in indented):
         return "AMBIGUOUS_INDENTATION", None
-    if len(content) < 2:
+    # A single indented line has no reliable evidence that it is export residue.
+    if len(indented) < 2:
         return "AMBIGUOUS_INDENTATION", None
-    if has_tab and all(line.startswith("\t") for line in content):
+    if has_tab and not has_spaces and all(line.startswith("\t") for line in indented):
         return "TAB_INDENTATION", "".join(line[1:] if line.startswith("\t") else line for line in lines)
-    if not has_tab and all(line.startswith("    ") for line in content):
+    if not has_tab and all(line.startswith("    ") for line in indented):
         return "FOUR_SPACE_INDENTATION", "".join(
             line[4:] if line.startswith("    ") else line for line in lines
         )
@@ -114,37 +126,47 @@ def _inspect_field(*, episode: sqlite3.Row, block: sqlite3.Row | None, table: st
     if not value:
         return None
     patterns: list[str] = []
+    safe_patterns: list[str] = []
+    review_patterns: list[str] = []
     candidate = value
     review_notes: list[str] = []
 
     if ENCODED_BR_RE.search(candidate):
         patterns.append("ENCODED_BR")
+        safe_patterns.append("ENCODED_BR")
         candidate = ENCODED_BR_RE.sub("\n", candidate)
     if LITERAL_BR_RE.search(candidate):
         patterns.append("LITERAL_BR")
+        safe_patterns.append("LITERAL_BR")
         candidate = LITERAL_BR_RE.sub("\n", candidate)
 
     for label, pattern in (("ENCODED_EMPTY_BLOCK", ENCODED_EMPTY_BLOCK_RE), ("LITERAL_EMPTY_BLOCK", LITERAL_EMPTY_BLOCK_RE)):
         if pattern.search(candidate):
             patterns.append(label)
             if _standalone_matches(candidate, pattern):
+                safe_patterns.append(label)
                 candidate = _remove_standalone_lines(candidate, pattern, "\n")
             else:
                 review_notes.append(f"{label} is not a standalone empty line")
+                review_patterns.append(label)
 
     if SYNCED_BLOCK_RE.search(candidate):
         patterns.append("NOTION_SYNCED_BLOCK_WRAPPER")
         if _standalone_matches(candidate, SYNCED_BLOCK_RE):
+            safe_patterns.append("NOTION_SYNCED_BLOCK_WRAPPER")
             candidate = _remove_standalone_lines(candidate, SYNCED_BLOCK_RE, "")
         else:
             review_notes.append("Notion synced_block wrapper is not standalone")
+            review_patterns.append("NOTION_SYNCED_BLOCK_WRAPPER")
 
     indent_pattern, normalized = _indentation_action(candidate)
     if indent_pattern:
         patterns.append(indent_pattern)
         if normalized is None:
             review_notes.append("indentation may be intentional preformatted content")
+            review_patterns.append(indent_pattern)
         else:
+            safe_patterns.append(indent_pattern)
             candidate = normalized
 
     # Any unknown tag-like residue is intentionally never removed automatically.
@@ -153,6 +175,7 @@ def _inspect_field(*, episode: sqlite3.Row, block: sqlite3.Row | None, table: st
     if HTML_LIKE_RE.search(candidate) and not any(pattern.search(candidate) for pattern in known_tags):
         patterns.append("UNKNOWN_HTML_OR_EXPORT_ARTIFACT")
         review_notes.append("unknown HTML-like or export residue")
+        review_patterns.append("UNKNOWN_HTML_OR_EXPORT_ARTIFACT")
 
     markdown_present = bool(MARKDOWN_EMPHASIS_RE.search(candidate))
     if markdown_present:
@@ -170,13 +193,17 @@ def _inspect_field(*, episode: sqlite3.Row, block: sqlite3.Row | None, table: st
     )
     if review_notes:
         return CleanupFinding(**identity, patterns=tuple(patterns), classification=REVIEW_REQUIRED,
-                              before=value, after=None, note="; ".join(review_notes))
+                              safe_patterns=tuple(safe_patterns), review_patterns=tuple(review_patterns),
+                              before=value, after=candidate if candidate != value else None,
+                              note="; ".join(review_notes))
     if candidate != value:
         return CleanupFinding(**identity, patterns=tuple(patterns), classification=SAFE_AUTO_FIX,
+                              safe_patterns=tuple(safe_patterns), review_patterns=(),
                               before=value, after=candidate,
                               note="mechanical serialization residue cleanup")
     if markdown_present:
         return CleanupFinding(**identity, patterns=tuple(patterns), classification=PRESERVED_MARKDOWN,
+                              safe_patterns=(), review_patterns=(),
                               before=value, after=None,
                               note="valid Markdown emphasis is preserved; no cleanup proposed")
     return None
@@ -217,12 +244,13 @@ def _scan_connection(conn: sqlite3.Connection) -> tuple[dict[str, int], list[Cle
     return {"scanned episodes": len(episodes), "scanned blocks": scanned_blocks, "scanned fields": scanned_fields}, findings
 
 
-def _report(summary: dict[str, int], findings: list[CleanupFinding], *, mode: str) -> dict[str, Any]:
+def _report(summary: dict[str, int], findings: list[CleanupFinding], *, mode: str,
+            include_full_values: bool = False) -> dict[str, Any]:
     pattern_counts = Counter(pattern for finding in findings for pattern in finding.patterns)
     status_counts = Counter(finding.classification for finding in findings)
     affected_episodes = sorted({finding.episode_code for finding in findings})
     affected_blocks = {(finding.episode_id, finding.block_id) for finding in findings if finding.block_id is not None}
-    return {
+    report = {
         "mode": mode,
         **summary,
         "affected episodes": len(affected_episodes),
@@ -231,10 +259,24 @@ def _report(summary: dict[str, int], findings: list[CleanupFinding], *, mode: st
         "SAFE_AUTO_FIX": status_counts[SAFE_AUTO_FIX],
         "REVIEW_REQUIRED": status_counts[REVIEW_REQUIRED],
         "PRESERVED_MARKDOWN": status_counts[PRESERVED_MARKDOWN],
+        "summary": {
+            "mode": mode,
+            "scanned_episodes": summary["scanned episodes"],
+            "scanned_blocks": summary["scanned blocks"],
+            "scanned_fields": summary["scanned fields"],
+            "affected_episodes": len(affected_episodes),
+            "affected_blocks": len(affected_blocks),
+            "pattern_counts": dict(sorted(pattern_counts.items())),
+            "SAFE_AUTO_FIX": status_counts[SAFE_AUTO_FIX],
+            "REVIEW_REQUIRED": status_counts[REVIEW_REQUIRED],
+            "PRESERVED_MARKDOWN": status_counts[PRESERVED_MARKDOWN],
+        },
         "findings": [
             {
-                "episode": item.episode_code, "sort_order": item.sort_order, "block_type": item.block_type,
+                "episode": item.episode_code, "episode_sequence": int(item.episode_code[3:]),
+                "sort_order": item.sort_order, "block_type": item.block_type,
                 "field": item.field, "detected_patterns": list(item.patterns),
+                "safe_patterns": list(item.safe_patterns), "review_patterns": list(item.review_patterns),
                 "classification": item.classification, "before_preview": _preview(item.before),
                 "proposed_after_preview": _preview(item.after) if item.after is not None else None,
                 "note": item.note,
@@ -242,13 +284,26 @@ def _report(summary: dict[str, int], findings: list[CleanupFinding], *, mode: st
             for item in findings
         ],
     }
+    if include_full_values:
+        for item, rendered in zip(findings, report["findings"]):
+            rendered["before_value"] = item.before
+            rendered["proposed_after_value"] = item.after
+    return report
 
 
-def scan_cleanup(db_path: str) -> dict[str, Any]:
+def scan_cleanup(db_path: str, *, report_json: str | Path | None = None) -> dict[str, Any]:
     """Read-only report. SQLite mode=ro guarantees the DB cannot be changed."""
     with _readonly_connection(db_path) as conn:
         summary, findings = _scan_connection(conn)
-    return _report(summary, findings, mode="dry-run")
+    console_report = _report(summary, findings, mode="dry-run")
+    if report_json is not None:
+        report_path = Path(report_json)
+        report_path.write_text(
+            json.dumps(_report(summary, findings, mode="dry-run", include_full_values=True), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        console_report["report_json"] = str(report_path)
+    return console_report
 
 
 def _update_finding(conn: sqlite3.Connection, finding: CleanupFinding) -> None:
